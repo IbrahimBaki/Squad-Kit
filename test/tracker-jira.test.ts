@@ -170,9 +170,9 @@ describe('JiraClient.searchIssues', () => {
     return new JiraClient({ host: 'h.atlassian.net', email: 'e', token: 't' });
   }
 
-  const searchOkStub =
-    (): typeof fetch =>
-    vi.fn(async () => new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 })) as typeof fetch;
+  function searchOkStub() {
+    return vi.fn(async () => new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 }));
+  }
 
   it('hits /rest/api/3/search/jql with empty query and order-by-updated JQL', async () => {
     const fetchMock = searchOkStub();
@@ -222,10 +222,7 @@ describe('JiraClient.searchIssues', () => {
       nextPageToken: 'abc',
       isLast: false,
     };
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch,
-    );
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
 
     const rows = await makeClient().searchIssues('foo');
 
@@ -248,7 +245,7 @@ describe('JiraClient.searchIssues', () => {
   });
 
   it('HTTP 410 on Jira search (deprecated endpoint regression) maps to TrackerError other with upgrade-squad-kit message', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 410 })) as typeof fetch);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 410 })));
 
     try {
       await makeClient().searchIssues('');
@@ -265,7 +262,7 @@ describe('JiraClient.searchIssues', () => {
   });
 
   it('HTTP 401 on search still maps to auth', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })) as typeof fetch);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })));
 
     await expect(makeClient().searchIssues('')).rejects.toMatchObject({
       name: 'TrackerError',
@@ -277,7 +274,7 @@ describe('JiraClient.searchIssues', () => {
   it('respects opts.limit clamped to [1, 50]', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 }),
-    ) as typeof fetch;
+    );
 
     vi.stubGlobal('fetch', fetchMock);
 
