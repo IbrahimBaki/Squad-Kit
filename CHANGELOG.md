@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-03
+
+### What's new
+
+- Generate page shows provider rate limits: countdown, auto-retry banner,
+  and rerun when the planner aborts over the wait cap.
+- Planner emits richer `rate_limit` stream events (`retrying` vs `aborted`,
+  cap seconds, provider, short error snippet). CLI `new-plan` only shows the
+  “waiting to retry” spinner for the retrying phase.
+- Run SSE ends a rate-limit abort with `done` (partial) only — no extra
+  `error` line repeating the same message.
+
+### Bug fixes
+
+- Jira issue search called deprecated `/rest/api/3/search` (Atlassian returns
+  HTTP 410). Search now uses `/rest/api/3/search/jql` with clearer 410 errors
+  if an old client hits removed endpoints.
+
 ## [0.7.2] — 2026-04-28
 
 ### Bug fixes
