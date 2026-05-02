@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, useSearch } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { Check, Copy, X } from 'lucide-react';
@@ -25,12 +25,27 @@ type PlannerSseEvent = {
   partial?: boolean;
   message?: string;
   waitSec?: number;
+  retryAfterSec?: number;
+  capSec?: number;
+  phase?: 'retrying' | 'aborted';
+  provider?: 'anthropic' | 'openai' | 'google';
+  rawBody?: string;
   delta?: string;
   usage?: { inputTokens?: number; outputTokens?: number };
   cacheHitRatio?: number;
   toolCall?: { input?: Record<string, unknown> };
   bytesLoaded?: number;
 };
+
+interface RateLimitState {
+  provider: 'anthropic' | 'openai' | 'google';
+  retryAfterSec: number;
+  capSec: number;
+  phase: 'retrying' | 'aborted';
+  /** Wall-clock millis when we received the event; the UI ticks down from this. */
+  receivedAtMs: number;
+  rawBody: string;
+}
 
 interface State {
   phase: Phase;
@@ -49,6 +64,7 @@ interface State {
   storyId: string;
   mode: 'api' | 'copy';
   error: string | null;
+  rateLimit: RateLimitState | null;
 }
 
 const initial: State = {
@@ -68,6 +84,7 @@ const initial: State = {
   storyId: '',
   mode: 'api',
   error: null,
+  rateLimit: null,
 };
 
 type Action =
@@ -92,6 +109,7 @@ function reducer(state: State, action: Action): State {
         ...state,
         phase: 'starting',
         error: null,
+        rateLimit: null,
         assistantMd: '',
         fileReads: [],
         cacheHitPct: null,
@@ -102,7 +120,13 @@ function reducer(state: State, action: Action): State {
         startedAtMs: Date.now(),
       };
     case 'start_stream':
-      return { ...state, phase: 'streaming', runId: action.runId, startedAtMs: state.startedAtMs ?? Date.now() };
+      return {
+        ...state,
+        phase: 'streaming',
+        runId: action.runId,
+        startedAtMs: state.startedAtMs ?? Date.now(),
+        rateLimit: null,
+      };
     case 'resume':
       return {
         ...state,
@@ -118,18 +142,24 @@ function reducer(state: State, action: Action): State {
         turn: 0,
         planFile: null,
         error: null,
+        rateLimit: null,
         startedAtMs: Date.now(),
       };
     case 'reset_stream_ui':
       return {
         ...state,
+        phase: 'idle',
+        runId: null,
+        error: null,
+        rateLimit: null,
+        startedAtMs: null,
+        planFile: null,
         assistantMd: '',
         fileReads: [],
         cacheHitPct: null,
         tokenIn: 0,
         tokenOut: 0,
         turn: 0,
-        planFile: null,
       };
     case 'tick':
       return { ...state, tick: state.tick + 1 };
@@ -138,6 +168,20 @@ function reducer(state: State, action: Action): State {
     case 'sse': {
       const e = action.event;
       let next: State = state;
+      if (e.kind === 'rate_limit' && e.phase) {
+        next = {
+          ...next,
+          rateLimit: {
+            provider: e.provider ?? 'anthropic',
+            retryAfterSec: e.retryAfterSec ?? e.waitSec ?? 0,
+            capSec: e.capSec ?? 90,
+            phase: e.phase,
+            receivedAtMs: Date.now(),
+            rawBody: e.rawBody ?? '',
+          },
+          phase: e.phase === 'aborted' ? 'failed' : next.phase,
+        };
+      }
       if (e.kind === 'usage' && e.usage) {
         const inn = e.usage.inputTokens ?? state.tokenIn;
         const out = e.usage.outputTokens ?? state.tokenOut;
@@ -174,7 +218,7 @@ function reducer(state: State, action: Action): State {
         const wasCancelled = next.phase === 'cancelled';
         next = { ...next, planFile: e.planFile ?? null };
         if (e.success) {
-          next = { ...next, phase: 'done', error: null };
+          next = { ...next, phase: 'done', error: null, rateLimit: null };
         } else if (wasCancelled || e.partial) {
           next = { ...next, phase: 'cancelled' };
         } else {
@@ -236,6 +280,85 @@ function useEventSourceBridge(runId: string | null, dispatch: React.Dispatch<Act
       es.close();
     };
   }, [runId, dispatch]);
+}
+
+function RateLimitPanel({
+  rateLimit,
+  onRerun,
+  onCancel,
+  rerunDisabled,
+}: {
+  rateLimit: RateLimitState;
+  onRerun: () => void;
+  onCancel: () => void;
+  rerunDisabled: boolean;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const elapsed = Math.floor((now - rateLimit.receivedAtMs) / 1000);
+  const remaining = Math.max(0, rateLimit.retryAfterSec - elapsed);
+  const tone = rateLimit.phase === 'retrying' ? 'info' : 'warning';
+  const limitsUrl: Record<typeof rateLimit.provider, string> = {
+    anthropic: 'https://console.anthropic.com/settings/limits',
+    openai: 'https://platform.openai.com/settings/organization/limits',
+    google: 'https://aistudio.google.com/app/plan_information',
+  };
+  return (
+    <Callout tone={tone} title={`${rateLimit.provider} rate limit hit`}>
+      <p>
+        Provider asked us to wait <strong>{rateLimit.retryAfterSec}s</strong>{' '}
+        {rateLimit.phase === 'retrying'
+          ? `before retrying. Auto-retrying in ${remaining}s…`
+          : `— this is longer than our ${rateLimit.capSec}s auto-retry cap, so we stopped before burning another request inside the same throttle window.`}
+      </p>
+      {rateLimit.phase === 'aborted' && (
+        <>
+          <p className="mt-2 tabular text-base font-semibold">
+            {remaining > 0 ? `Wait ${remaining}s` : 'Ready to retry'}
+          </p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-[13px]">
+            <li>
+              Wait the full window, then click <strong>Rerun planner</strong>.
+            </li>
+            <li>
+              Pick a smaller model — open{' '}
+              <Link to={'/config' as never} className="underline">
+                Config
+              </Link>{' '}
+              and run <code className="text-xs">squad config set planner</code>.
+            </li>
+            <li>
+              Tighten <code className="text-xs">planner.budget</code> in <code className="text-xs">.squad/config.yaml</code>.
+            </li>
+            <li>
+              Upgrade your tier:{' '}
+              <a className="underline" href={limitsUrl[rateLimit.provider]} target="_blank" rel="noreferrer">
+                {limitsUrl[rateLimit.provider]}
+              </a>
+              .
+            </li>
+          </ul>
+          <details className="mt-3 text-xs text-[var(--color-text-muted)]">
+            <summary className="cursor-pointer">Show provider details</summary>
+            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-[var(--gray-2)] p-2 font-mono text-[11px]">
+              {rateLimit.rawBody || '(no body)'}
+            </pre>
+          </details>
+          <div className="mt-3 flex gap-2">
+            <Button type="button" disabled={rerunDisabled || remaining > 0} onClick={onRerun}>
+              {remaining > 0 ? `Wait ${remaining}s` : 'Rerun planner'}
+            </Button>
+            <Button type="button" variant="secondary" onClick={onCancel}>
+              Cancel
+            </Button>
+          </div>
+        </>
+      )}
+    </Callout>
+  );
 }
 
 function StatusRow({
@@ -674,6 +797,20 @@ export function GeneratePage() {
         </div>
       )}
 
+      {state.rateLimit && (
+        <RateLimitPanel
+          rateLimit={state.rateLimit}
+          onRerun={() => void runPlanner()}
+          onCancel={() => {
+            if (state.runId) void cancelRun();
+            dispatch({ type: 'reset_stream_ui' });
+          }}
+          rerunDisabled={
+            state.phase === 'streaming' || state.phase === 'starting' || !state.feature || !state.storyId
+          }
+        />
+      )}
+
       {(state.phase === 'streaming' || state.phase === 'starting' || state.phase === 'done' || state.phase === 'failed' || state.phase === 'cancelled') && (
         <StatusRow state={state} elapsedSec={elapsedSec} tokenPct={tokenPct} cancelRun={() => void cancelRun()} />
       )}
@@ -714,7 +851,11 @@ export function GeneratePage() {
         </Callout>
       )}
 
-      {state.error && state.phase === 'failed' && <Callout tone="danger" title="Run failed">{state.error}</Callout>}
+      {state.error && state.phase === 'failed' && !state.rateLimit && (
+        <Callout tone="danger" title="Run failed">
+          {state.error}
+        </Callout>
+      )}
     </Page>
   );
 }

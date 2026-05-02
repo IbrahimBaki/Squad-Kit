@@ -1,4 +1,4 @@
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
@@ -237,5 +237,145 @@ describe('GeneratePage', () => {
     });
     const feature = screen.getByLabelText('Feature') as HTMLSelectElement;
     expect(feature.value).toBe('demo');
+  });
+
+  it('shows the rate-limit panel and lets the user wait then rerun', async () => {
+    const stories: ApiStory[] = [
+      {
+        feature: 'demo',
+        id: '01-x',
+        intakePath: '/p',
+        storyDir: '/s',
+        planFile: null,
+        titleHint: 't',
+      },
+    ];
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === '/api/stories') return stories;
+      if (path === '/api/config') return { planner: { enabled: true, provider: 'anthropic' }, version: 1 };
+      if (path === '/api/runs/active') return [];
+      throw new Error(`unexpected ${path}`);
+    });
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ runId: 'run-1' }),
+    } as Response);
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => expect(MockEventSource.instances.length).toBe(1));
+    const es = MockEventSource.instances[0]!;
+
+    const t0 = 1_700_000_000_000;
+    let clock = t0;
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+
+    es.emit(
+      'rate_limit',
+      JSON.stringify({
+        kind: 'rate_limit',
+        runId: 'run-1',
+        turn: 1,
+        retryAfterSec: 3,
+        waitSec: 3,
+        capSec: 90,
+        phase: 'aborted',
+        provider: 'anthropic',
+        rawBody: 'anthropic 429',
+      }),
+    );
+    es.emit(
+      'done',
+      JSON.stringify({
+        kind: 'done',
+        runId: 'run-1',
+        success: false,
+        partial: true,
+        planFile: null,
+        stats: {
+          turns: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          cacheHitRatio: 0,
+          durationMs: 1,
+        },
+        durationMs: 1,
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(/anthropic rate limit hit/i)).toBeInTheDocument());
+    const waitBtn = screen.getByRole('button', { name: 'Wait 3s' });
+    expect(waitBtn).toBeDisabled();
+    expect(screen.queryByText('Run failed')).not.toBeInTheDocument();
+
+    try {
+      clock = t0 + 5000;
+      await act(async () => {
+        await new Promise<void>((r) => setTimeout(r, 1200));
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(screen.getByRole('button', { name: 'Rerun planner' })).toBeEnabled();
+  });
+
+  it('auto-retry path renders an info banner without action buttons', async () => {
+    const stories: ApiStory[] = [
+      {
+        feature: 'demo',
+        id: '01-x',
+        intakePath: '/p',
+        storyDir: '/s',
+        planFile: null,
+        titleHint: 't',
+      },
+    ];
+    apiMock.mockImplementation(async (path: string) => {
+      if (path === '/api/stories') return stories;
+      if (path === '/api/config') return { planner: { enabled: true, provider: 'anthropic' }, version: 1 };
+      if (path === '/api/runs/active') return [];
+      throw new Error(`unexpected ${path}`);
+    });
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ runId: 'run-1' }),
+    } as Response);
+
+    renderPage();
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Run' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() => expect(MockEventSource.instances.length).toBe(1));
+    const es = MockEventSource.instances[0]!;
+
+    es.emit(
+      'rate_limit',
+      JSON.stringify({
+        kind: 'rate_limit',
+        runId: 'run-1',
+        turn: 1,
+        retryAfterSec: 5,
+        waitSec: 5,
+        capSec: 90,
+        phase: 'retrying',
+        provider: 'anthropic',
+        rawBody: '429',
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(/Auto-retrying in/)).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: /rerun planner/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Cancel$/ })).toBeNull();
   });
 });
