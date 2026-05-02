@@ -375,12 +375,26 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
     let retrySkippedReason: 'retry_after_too_long' | undefined;
     if (response.stopReason === 'error' && response.errorKind === 'rate_limit') {
       const asked = response.retryAfterSec;
+      const emitRateLimit = (phase: 'retrying' | 'aborted', waitSec: number) => {
+        bus.emit({
+          kind: 'rate_limit',
+          runId,
+          turn: iterations,
+          retryAfterSec: response.retryAfterSec,
+          waitSec,
+          capSec: MAX_RATE_LIMIT_RETRY_SEC,
+          phase,
+          provider: input.provider.name,
+          rawBody: (response.rawError ?? '').slice(0, 200),
+        });
+      };
       if (asked !== undefined && asked > MAX_RATE_LIMIT_RETRY_SEC) {
+        emitRateLimit('aborted', asked);
         retrySkippedReason = 'retry_after_too_long';
       } else {
         const waitSec = Math.min(asked ?? 10, MAX_RATE_LIMIT_RETRY_SEC);
+        emitRateLimit('retrying', waitSec);
         input.onRateLimit?.(waitSec);
-        bus.emit({ kind: 'rate_limit', runId, turn: iterations, waitSec });
         try {
           await sleepWithAbort(waitSec * 1000, sleepFn, input.abort);
         } catch (e) {

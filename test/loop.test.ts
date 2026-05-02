@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runPlanner } from '../src/planner/loop.js';
+import { PlannerEventBus, type PlannerEvent } from '../src/planner/events.js';
 import { Budget } from '../src/planner/budget.js';
 import { READ_FILE_TOOL } from '../src/planner/tools.js';
 import type { PlannerProvider, ProviderRequest, ProviderResponse, ToolCall } from '../src/planner/types.js';
@@ -162,9 +163,12 @@ describe('runPlanner', () => {
     ).rejects.toThrow(/provider exploded[\s\S]*squad doctor[\s\S]*5xx errors are transient/);
   });
 
-  it('retries once on rate_limit and continues when the retry succeeds', async () => {
+  it('emits rate_limit phase retrying before retrying and continues when the retry succeeds', async () => {
     const sleepCalls: number[] = [];
     const onRateLimit = vi.fn();
+    const bus = new PlannerEventBus();
+    const busEvents: PlannerEvent[] = [];
+    bus.subscribe((ev) => busEvents.push(ev));
     const provider = mockProvider([
       {
         stopReason: 'error',
@@ -187,11 +191,24 @@ describe('runPlanner', () => {
         sleepCalls.push(ms);
       },
       onRateLimit,
+      events: bus,
+      runId: 'run-test',
     });
     expect(sleepCalls).toEqual([3000]);
     expect(onRateLimit).toHaveBeenCalledWith(3);
     expect(result.planText).toContain('after retry');
     expect(result.finishedNormally).toBe(true);
+    const rl = busEvents.filter((e) => e.kind === 'rate_limit');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]).toMatchObject({
+      kind: 'rate_limit',
+      runId: 'run-test',
+      phase: 'retrying',
+      provider: 'anthropic',
+      capSec: 90,
+      waitSec: 3,
+      retryAfterSec: 3,
+    });
   });
 
   it('honours retry-after up to the 90s cap', async () => {
@@ -217,6 +234,9 @@ describe('runPlanner', () => {
     const sleepCalls: number[] = [];
     const onRateLimit = vi.fn();
     const sends = vi.fn<(r: unknown) => Promise<unknown>>();
+    const bus = new PlannerEventBus();
+    const busEvents: PlannerEvent[] = [];
+    bus.subscribe((ev) => busEvents.push(ev));
     const provider: PlannerProvider = {
       name: 'anthropic',
       async send(req) {
@@ -240,11 +260,25 @@ describe('runPlanner', () => {
         budget: new Budget(budgetCfg),
         sleep: async (ms) => void sleepCalls.push(ms),
         onRateLimit,
+        events: bus,
+        runId: 'run-abort',
       }),
     ).rejects.toThrow(/did not auto-retry[\s\S]*132s wait is longer than our 90s cap/);
     expect(sleepCalls).toEqual([]);
     expect(onRateLimit).not.toHaveBeenCalled();
     expect(sends).toHaveBeenCalledTimes(1);
+    const rl = busEvents.filter((e) => e.kind === 'rate_limit');
+    expect(rl).toHaveLength(1);
+    expect(rl[0]).toMatchObject({
+      kind: 'rate_limit',
+      runId: 'run-abort',
+      phase: 'aborted',
+      provider: 'anthropic',
+      capSec: 90,
+      waitSec: 132,
+      retryAfterSec: 132,
+    });
+    expect((rl[0] as { rawBody?: string }).rawBody).toContain('anthropic 429');
   });
 
   it('throws an actionable rate-limit error when both attempts are rate-limited', async () => {

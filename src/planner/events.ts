@@ -1,4 +1,4 @@
-import type { ToolCall, Usage, PlannerRunStats } from './types.js';
+import type { ToolCall, Usage, PlannerRunStats, ProviderName } from './types.js';
 
 export type PlannerEvent =
   | { kind: 'started'; runId: string; provider: string; model: string; cacheEnabled: boolean }
@@ -15,7 +15,22 @@ export type PlannerEvent =
     }
   | { kind: 'tool_call'; runId: string; turn: number; toolCall: ToolCall; bytesLoaded: number; totalBytes: number }
   | { kind: 'assistant_text'; runId: string; turn: number; delta: string }
-  | { kind: 'rate_limit'; runId: string; turn: number; waitSec: number }
+  | {
+      kind: 'rate_limit';
+      runId: string;
+      turn: number;
+      /** Seconds the provider asked us to wait. Source-of-truth countdown. */
+      retryAfterSec: number | undefined;
+      /** Seconds we will actually sleep before retrying. Equals min(retryAfterSec, cap). */
+      waitSec: number;
+      /** Our retry cap. Lets the UI explain "we'll retry up to <cap>s". */
+      capSec: number;
+      /** 'retrying' = the loop is sleeping then retrying. 'aborted' = retryAfterSec > capSec, the loop will throw next. */
+      phase: 'retrying' | 'aborted';
+      provider: ProviderName;
+      /** Same `Raw provider response` snippet as in the CLI message, capped at 200 chars. */
+      rawBody?: string;
+    }
   | { kind: 'turn_complete'; runId: string; turn: number; stopReason: string }
   | {
       kind: 'done';

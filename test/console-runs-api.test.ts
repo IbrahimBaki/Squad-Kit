@@ -137,6 +137,92 @@ describe('console runs API', () => {
     expect(text).toContain('event: closed');
   });
 
+  it('SSE on rate-limit abort: rate_limit aborted then done without error event', async () => {
+    runPlannerMock.mockImplementation(async (opts) => {
+      opts.events?.emit({
+        kind: 'rate_limit',
+        runId: opts.runId!,
+        turn: 1,
+        retryAfterSec: 600,
+        waitSec: 600,
+        capSec: 90,
+        phase: 'aborted',
+        provider: 'anthropic',
+        rawBody: 'anthropic 429',
+      });
+      await new Promise<void>((r) => setTimeout(r, 80));
+      throw new Error('anthropic rate limit hit — provider asked us to wait 600s');
+    });
+
+    const post = await fetch(`${baseUrl}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ feature: 'demo', storyId: '01-pull' }),
+    });
+    expect(post.status).toBe(202);
+    const body = (await post.json()) as { runId: string; eventStream: string };
+
+    const streamP = fetch(`${baseUrl}${body.eventStream}?t=${encodeURIComponent(TOKEN)}`).then((r) => r.text());
+    const text = await streamP;
+
+    expect(text).toContain('event: rate_limit');
+    expect(text).toContain('"phase":"aborted"');
+    expect(text).toContain('event: done');
+    expect(text).toContain('"success":false');
+    expect(text).toContain('"partial":true');
+    expect(text).not.toContain('event: error');
+    expect(text).toContain('event: closed');
+  });
+
+  it('SSE when runPlanner succeeds after rate_limit retrying mock emits only structured rate_limit', async () => {
+    runPlannerMock.mockImplementation(async (opts) => {
+      opts.events?.emit({
+        kind: 'rate_limit',
+        runId: opts.runId!,
+        turn: 1,
+        retryAfterSec: 30,
+        waitSec: 30,
+        capSec: 90,
+        phase: 'retrying',
+        provider: 'anthropic',
+        rawBody: '429',
+      });
+      await new Promise<void>((r) => setTimeout(r, 80));
+      return {
+        planText: '# Plan\n',
+        budgetExhausted: false,
+        timedOut: false,
+        finishedNormally: true,
+        iterations: 1,
+        stats: {
+          turns: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          cacheHitRatio: 0,
+          durationMs: 1,
+        },
+      };
+    });
+
+    const post = await fetch(`${baseUrl}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ feature: 'demo', storyId: '01-pull' }),
+    });
+    expect(post.status).toBe(202);
+    const { eventStream } = (await post.json()) as { runId: string; eventStream: string };
+
+    const streamP = fetch(`${baseUrl}${eventStream}?t=${encodeURIComponent(TOKEN)}`).then((r) => r.text());
+    const text = await streamP;
+    expect(text).toContain('event: rate_limit');
+    expect(text).toContain('"phase":"retrying"');
+    expect(text).toContain('event: done');
+    expect(text).toContain('"success":true');
+    expect(text).not.toContain('event: error');
+  });
+
   it('DELETE /api/runs/:id aborts and stream eventually closes', async () => {
     runPlannerMock.mockImplementation(async (opts) => {
       opts.events?.emit({

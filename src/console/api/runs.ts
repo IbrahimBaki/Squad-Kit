@@ -131,7 +131,11 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
         });
       } catch (err) {
         const durationMs = Date.now() - startedAt;
-        bus.emit({ kind: 'error', runId, message: (err as Error).message });
+        const last = eventBuffer[eventBuffer.length - 1];
+        const isRateLimitAbort = last?.kind === 'rate_limit' && last.phase === 'aborted';
+        if (!isRateLimitAbort) {
+          bus.emit({ kind: 'error', runId, message: (err as Error).message });
+        }
         bus.emit({
           kind: 'done',
           runId,

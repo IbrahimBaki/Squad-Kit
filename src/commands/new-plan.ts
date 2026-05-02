@@ -244,9 +244,11 @@ async function emitViaApi(
         sessionSpinner.current = ui.spinner('thinking…');
         break;
       case 'rate_limit':
-        sessionSpinner.current?.stop();
-        ui.warning(`${planner.provider} rate limit hit — retrying in ${e.waitSec}s`);
-        sessionSpinner.current = ui.spinner('waiting for rate limit to reset…');
+        if (e.phase === 'retrying') {
+          sessionSpinner.current?.stop();
+          ui.warning(`${e.provider} rate limit hit — retrying in ${e.waitSec}s`);
+          sessionSpinner.current = ui.spinner('waiting for rate limit to reset…');
+        }
         break;
       case 'usage':
         break;
