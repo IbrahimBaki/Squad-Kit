@@ -83,8 +83,13 @@ export class JiraClient implements TrackerClient {
       const esc = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       jql = `text ~ "${esc}" order by updated DESC`;
     }
+    // Atlassian sunset GET /rest/api/3/search in late 2025 (now returns 410 Gone).
+    // /rest/api/3/search/jql is the supported replacement; same JQL grammar, same
+    // `fields` and `maxResults` query params. Pagination switched from `startAt`
+    // to `nextPageToken`, but we only ever request one page (≤ 50 issues), so we
+    // don't read or send a token.
     const url =
-      `${this.baseUrl}/rest/api/3/search?jql=${encodeURIComponent(jql)}` +
+      `${this.baseUrl}/rest/api/3/search/jql?jql=${encodeURIComponent(jql)}` +
       `&fields=summary,status,issuetype&maxResults=${limit}`;
     let res: Response;
     try {
@@ -93,7 +98,13 @@ export class JiraClient implements TrackerClient {
       throw new TrackerError(`Jira search failed: ${(err as Error).message}`, 'network');
     }
     if (!res.ok) throw this.mapHttpError(res.status, 'search');
-    const body = (await res.json()) as { issues?: JiraSearchIssue[] };
+    // TODO(jira-paging): if we ever need > 50 results we should follow `nextPageToken`
+    // until `isLast === true`. For the Tracker page we cap at 25, so a single call is fine.
+    const body = (await res.json()) as {
+      issues?: JiraSearchIssue[];
+      nextPageToken?: string;
+      isLast?: boolean;
+    };
     const issues = body.issues ?? [];
     return issues.map((it) => {
       const key = it.key ?? '';
@@ -142,6 +153,18 @@ export class JiraClient implements TrackerClient {
     }
     if (status === 429) {
       return new TrackerError(`Jira rate limit hit (HTTP 429). Wait a minute and retry.`, 'rate-limited', status);
+    }
+    if (status === 410) {
+      return new TrackerError(
+        id === 'search'
+          ? `Jira search endpoint has been removed by Atlassian (HTTP 410). ` +
+              `squad-kit must call /rest/api/3/search/jql instead — upgrade squad-kit ` +
+              `to a version that includes this fix.`
+          : `Jira endpoint has been removed by Atlassian (HTTP 410). ` +
+              `Upgrade squad-kit to a version that calls the current Jira Cloud REST API.`,
+        'other',
+        status,
+      );
     }
     return new TrackerError(
       id === 'search' ? `Jira search failed (HTTP ${status}).` : `Jira request failed (HTTP ${status}).`,

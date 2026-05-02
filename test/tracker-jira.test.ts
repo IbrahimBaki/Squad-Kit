@@ -164,3 +164,128 @@ describe('JiraClient', () => {
     expect(decoded).toBe('alice@co.test:secret-token');
   });
 });
+
+describe('JiraClient.searchIssues', () => {
+  function makeClient(): JiraClient {
+    return new JiraClient({ host: 'h.atlassian.net', email: 'e', token: 't' });
+  }
+
+  const searchOkStub =
+    (): typeof fetch =>
+    vi.fn(async () => new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 })) as typeof fetch;
+
+  it('hits /rest/api/3/search/jql with empty query and order-by-updated JQL', async () => {
+    const fetchMock = searchOkStub();
+    vi.stubGlobal('fetch', fetchMock);
+    await makeClient().searchIssues('');
+    const { url } = firstFetchCall(fetchMock);
+    expect(url.startsWith('https://h.atlassian.net/rest/api/3/search/jql?')).toBe(true);
+    expect(url.includes('/rest/api/3/search?')).toBe(false);
+    const u = new URL(url);
+    expect(u.searchParams.get('jql')).toBe('order by updated DESC');
+    expect(u.searchParams.get('fields')).toBe('summary,status,issuetype');
+    expect(u.searchParams.get('maxResults')).toBe('25');
+  });
+
+  it('hits /rest/api/3/search/jql with issuekey JQL for "PROJ-42"', async () => {
+    const fetchMock = searchOkStub();
+    vi.stubGlobal('fetch', fetchMock);
+    await makeClient().searchIssues('PROJ-42');
+    const { url } = firstFetchCall(fetchMock);
+    const u = new URL(url);
+    expect(u.pathname).toBe('/rest/api/3/search/jql');
+    expect(u.searchParams.get('jql')).toBe('issuekey = "PROJ-42"');
+  });
+
+  it('hits /rest/api/3/search/jql with text-CONTAINS JQL and escaped quotes for free text', async () => {
+    const fetchMock = searchOkStub();
+    vi.stubGlobal('fetch', fetchMock);
+    await makeClient().searchIssues('o"malley');
+    const { url } = firstFetchCall(fetchMock);
+    const u = new URL(url);
+    expect(u.searchParams.get('jql')).toBe('text ~ "o\\"malley" order by updated DESC');
+    expect(url).toContain('text%20~%20%22o%5C%22malley%22%20order%20by%20updated%20DESC');
+  });
+
+  it('maps issues from the new envelope (nextPageToken / isLast, no total/startAt)', async () => {
+    const body = {
+      issues: [
+        {
+          key: 'PROJ-1',
+          fields: { summary: 'First', issuetype: { name: 'Bug' }, status: { name: 'Open' } },
+        },
+        {
+          key: 'PROJ-2',
+          fields: { summary: 'Second' },
+        },
+      ],
+      nextPageToken: 'abc',
+      isLast: false,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })) as typeof fetch,
+    );
+
+    const rows = await makeClient().searchIssues('foo');
+
+    expect(rows).toEqual([
+      {
+        id: 'PROJ-1',
+        title: 'First',
+        type: 'Bug',
+        status: 'Open',
+        url: 'https://h.atlassian.net/browse/PROJ-1',
+      },
+      {
+        id: 'PROJ-2',
+        title: 'Second',
+        type: undefined,
+        status: undefined,
+        url: 'https://h.atlassian.net/browse/PROJ-2',
+      },
+    ]);
+  });
+
+  it('HTTP 410 on Jira search (deprecated endpoint regression) maps to TrackerError other with upgrade-squad-kit message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 410 })) as typeof fetch);
+
+    try {
+      await makeClient().searchIssues('');
+      expect.fail('expected throw');
+    } catch (e) {
+      expect(e).toMatchObject({
+        name: 'TrackerError',
+        kind: 'other',
+        statusCode: 410,
+      });
+      expect(e instanceof TrackerError && e.message.includes('removed by Atlassian')).toBe(true);
+      expect(e instanceof TrackerError && e.message.toLowerCase().includes('upgrade squad-kit')).toBe(true);
+    }
+  });
+
+  it('HTTP 401 on search still maps to auth', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 401 })) as typeof fetch);
+
+    await expect(makeClient().searchIssues('')).rejects.toMatchObject({
+      name: 'TrackerError',
+      kind: 'auth',
+      statusCode: 401,
+    });
+  });
+
+  it('respects opts.limit clamped to [1, 50]', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 }),
+    ) as typeof fetch;
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    await makeClient().searchIssues('', { limit: 100 });
+    expect(new URL(firstFetchCall(fetchMock).url).searchParams.get('maxResults')).toBe('50');
+
+    fetchMock.mockClear();
+    await makeClient().searchIssues('', { limit: 0 });
+    expect(new URL(firstFetchCall(fetchMock).url).searchParams.get('maxResults')).toBe('1');
+  });
+});
