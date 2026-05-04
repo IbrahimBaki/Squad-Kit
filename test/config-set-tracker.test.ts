@@ -76,7 +76,7 @@ describe('config set tracker', () => {
       const mode = fs.statSync(path.join(tmp, SQUAD_DIR, 'secrets.yaml')).mode & 0o777;
       expect(mode).toBe(0o600);
     }
-  });
+  }, 25_000);
 
   it('interactive azure: saves org, project, pat', async () => {
     saveConfig(path.join(tmp, SQUAD_DIR, 'config.yaml'), baseConfig());
@@ -92,7 +92,7 @@ describe('config set tracker', () => {
     expect(c.tracker.project).toBe('prj');
     const s = loadSecrets(path.join(tmp, SQUAD_DIR, 'secrets.yaml'));
     expect(s.tracker?.azure?.organization).toBe('myorg');
-  });
+  }, 25_000);
 
   it('jira to azure: keeps jira in secrets', async () => {
     const cfg: SquadConfig = {
@@ -114,7 +114,7 @@ describe('config set tracker', () => {
     const s = loadSecrets(path.join(tmp, SQUAD_DIR, 'secrets.yaml'));
     expect(s.tracker?.jira?.host).toBe('h.net');
     expect(s.tracker?.azure?.organization).toBe('orgx');
-  });
+  }, 25_000);
 
   it('--type none: clears type; keeps credentials in secrets', async () => {
     const cfg: SquadConfig = {

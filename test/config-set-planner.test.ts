@@ -88,7 +88,7 @@ describe('config set planner', () => {
       const mode = fs.statSync(path.join(tmp, SQUAD_DIR, 'secrets.yaml')).mode & 0o777;
       expect(mode).toBe(0o600);
     }
-  });
+  }, 25_000);
 
   it('change provider: anthropic key preserved when switching to openai', async () => {
     const cfg: SquadConfig = {

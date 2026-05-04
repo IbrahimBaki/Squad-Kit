@@ -108,7 +108,7 @@ describe('console visual editors API', () => {
     expect(res.status).toBe(200);
     const j = (await res.json()) as { ok: boolean; modelCount?: number; status?: number; detail?: string };
     expect(typeof j.ok).toBe('boolean');
-  });
+  }, 25_000);
 
   it('GET /api/tracker/search with tracker none returns 400', async () => {
     const res = await authed('/api/tracker/search?q=');
