@@ -174,7 +174,7 @@ describe('JiraClient.searchIssues', () => {
     return vi.fn(async () => new Response(JSON.stringify({ issues: [], isLast: true }), { status: 200 }));
   }
 
-  it('hits /rest/api/3/search/jql with empty query and order-by-updated JQL', async () => {
+  it('hits /rest/api/3/search/jql with empty query and a bounded JQL', async () => {
     const fetchMock = searchOkStub();
     vi.stubGlobal('fetch', fetchMock);
     await makeClient().searchIssues('');
@@ -182,7 +182,8 @@ describe('JiraClient.searchIssues', () => {
     expect(url.startsWith('https://h.atlassian.net/rest/api/3/search/jql?')).toBe(true);
     expect(url.includes('/rest/api/3/search?')).toBe(false);
     const u = new URL(url);
-    expect(u.searchParams.get('jql')).toBe('order by updated DESC');
+    // Bounded by `updated >= -90d` to satisfy /search/jql; ORDER BY preserved.
+    expect(u.searchParams.get('jql')).toBe('updated >= -90d ORDER BY updated DESC');
     expect(u.searchParams.get('fields')).toBe('summary,status,issuetype');
     expect(u.searchParams.get('maxResults')).toBe('25');
   });
@@ -284,5 +285,86 @@ describe('JiraClient.searchIssues', () => {
     fetchMock.mockClear();
     await makeClient().searchIssues('', { limit: 0 });
     expect(new URL(firstFetchCall(fetchMock).url).searchParams.get('maxResults')).toBe('1');
+  });
+
+  it('HTTP 400 from /search/jql carries Atlassian errorMessages in TrackerError.message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              errorMessages: [
+                'The query is unbounded. The query must be bounded by something like a project, an assignee, or a date range.',
+              ],
+              errors: {},
+            }),
+            { status: 400, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+
+    try {
+      await makeClient().searchIssues('');
+      expect.fail('expected throw');
+    } catch (e) {
+      expect(e).toMatchObject({ name: 'TrackerError', kind: 'other', statusCode: 400 });
+      const err = e as TrackerError;
+      expect(err.message).toContain('Jira search failed (HTTP 400).');
+      expect(err.message).toContain('The query is unbounded.');
+    }
+  });
+
+  it('HTTP 400 with non-JSON body falls back to a truncated raw snippet', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('Bad Request: malformed JQL', { status: 400 })),
+    );
+    await expect(makeClient().searchIssues('foo')).rejects.toMatchObject({
+      name: 'TrackerError',
+      kind: 'other',
+      statusCode: 400,
+      message: expect.stringContaining('Bad Request: malformed JQL'),
+    });
+  });
+
+  it('HTTP 500 surfaces Atlassian errorMessages on fetchIssue too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ errorMessages: ['Server error processing JQL'], errors: {} }),
+            { status: 500, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    try {
+      await new JiraClient({ host: 'h.atlassian.net', email: 'e', token: 't' }).fetchIssue('PROJ-1');
+      expect.fail('expected throw');
+    } catch (e) {
+      expect(e).toMatchObject({ name: 'TrackerError', kind: 'other', statusCode: 500 });
+      expect((e as TrackerError).message).toContain('Server error processing JQL');
+    }
+  });
+
+  it('401 still ignores body and emits the generic auth message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ errorMessages: ['ignored on auth'], errors: {} }),
+            { status: 401, headers: { 'content-type': 'application/json' } },
+          ),
+      ),
+    );
+    try {
+      await makeClient().searchIssues('');
+      expect.fail('expected throw');
+    } catch (e) {
+      expect((e as TrackerError).message).not.toContain('ignored on auth');
+      expect((e as TrackerError).message).toContain('authentication failed');
+    }
   });
 });

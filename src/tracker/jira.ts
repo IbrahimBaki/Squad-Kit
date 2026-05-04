@@ -38,7 +38,10 @@ export class JiraClient implements TrackerClient {
     } catch (err) {
       throw new TrackerError(`Jira fetch failed: ${(err as Error).message}`, 'network');
     }
-    if (!res.ok) throw this.mapHttpError(res.status, id);
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw this.mapHttpError(res.status, id, errBody);
+    }
 
     const body = (await res.json()) as JiraIssuePayload;
     const fields = body.fields ?? {};
@@ -78,7 +81,11 @@ export class JiraClient implements TrackerClient {
     if (/^[A-Z][A-Z0-9_]+-\d+$/i.test(q)) {
       jql = `issuekey = "${q.toUpperCase()}"`;
     } else if (q.length === 0) {
-      jql = 'order by updated DESC';
+      // /rest/api/3/search/jql rejects unbounded JQL with HTTP 400. The "show recent issues
+      // on Tracker page mount" intent is preserved by adding a date constraint that captures
+      // ~3 months of activity — broad enough to surface anything the user is likely to want,
+      // narrow enough to satisfy the bounded-query requirement.
+      jql = 'updated >= -90d ORDER BY updated DESC';
     } else {
       const esc = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
       jql = `text ~ "${esc}" order by updated DESC`;
@@ -97,7 +104,10 @@ export class JiraClient implements TrackerClient {
     } catch (err) {
       throw new TrackerError(`Jira search failed: ${(err as Error).message}`, 'network');
     }
-    if (!res.ok) throw this.mapHttpError(res.status, 'search');
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => '');
+      throw this.mapHttpError(res.status, 'search', errBody);
+    }
     // TODO(jira-paging): if we ever need > 50 results we should follow `nextPageToken`
     // until `isLast === true`. For the Tracker page we cap at 25, so a single call is fine.
     const body = (await res.json()) as {
@@ -134,7 +144,7 @@ export class JiraClient implements TrackerClient {
     };
   }
 
-  private mapHttpError(status: number, id: string): TrackerError {
+  private mapHttpError(status: number, id: string, body = ''): TrackerError {
     if (status === 401 || status === 403) {
       return new TrackerError(
         `Jira authentication failed (HTTP ${status}). Check your email and API token in .squad/secrets.yaml.`,
@@ -166,11 +176,13 @@ export class JiraClient implements TrackerClient {
         status,
       );
     }
-    return new TrackerError(
-      id === 'search' ? `Jira search failed (HTTP ${status}).` : `Jira request failed (HTTP ${status}).`,
-      'other',
-      status,
-    );
+
+    const reason = extractJiraErrorMessages(body);
+    const base =
+      id === 'search'
+        ? `Jira search failed (HTTP ${status}).`
+        : `Jira request failed (HTTP ${status}).`;
+    return new TrackerError(reason ? `${base} ${reason}` : base, 'other', status);
   }
 }
 
@@ -219,4 +231,33 @@ function stripHtml(html: string): string {
     .replace(/&#39;/g, "'")
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+/**
+ * Atlassian REST APIs return errors in `{ errorMessages: string[], errors: Record<string,string> }`.
+ * Concatenate the human-readable bits and cap at ~200 chars so we don't echo a multi-KB response
+ * into terminal output or the console danger callout.
+ */
+function extractJiraErrorMessages(body: string): string {
+  if (!body) return '';
+  let parsed: { errorMessages?: unknown; errors?: unknown };
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return body.slice(0, 200);
+  }
+  const messages: string[] = [];
+  if (Array.isArray(parsed.errorMessages)) {
+    for (const m of parsed.errorMessages) {
+      if (typeof m === 'string' && m.trim().length > 0) messages.push(m.trim());
+    }
+  }
+  if (parsed.errors && typeof parsed.errors === 'object') {
+    for (const [k, v] of Object.entries(parsed.errors as Record<string, unknown>)) {
+      if (typeof v === 'string' && v.trim().length > 0) messages.push(`${k}: ${v.trim()}`);
+    }
+  }
+  if (messages.length === 0) return '';
+  const joined = messages.join(' ');
+  return joined.length > 200 ? `${joined.slice(0, 197)}...` : joined;
 }
