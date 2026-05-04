@@ -13,6 +13,8 @@ import { SecretsPage } from './pages/SecretsPage';
 import { TrackerPage } from './pages/TrackerPage';
 import { DoctorPage } from './pages/DoctorPage';
 import { DesignPlayground } from './pages/DesignPlayground';
+import { RunsIndexPage } from './pages/RunsIndexPage';
+import { RunReportPage } from './pages/RunReportPage';
 
 const rootRoute = createRootRoute({
   component: Layout,
@@ -61,6 +63,18 @@ const config = leaf('/config', ConfigPage);
 const secrets = leaf('/secrets', SecretsPage);
 const tracker = leaf('/tracker', TrackerPage);
 const doctor = leaf('/doctor', DoctorPage);
+const runsIndex = leaf('/runs', RunsIndexPage);
+const runReport = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/runs/$runId',
+  validateSearch: (search: Record<string, unknown>) => {
+    const t = typeof search.tab === 'string' ? search.tab : '';
+    const tab =
+      t === 'plan' || t === 'issues' || t === 'telemetry' ? (t as 'plan' | 'issues' | 'telemetry') : 'plan';
+    return { tab };
+  },
+  component: RunReportPage as never,
+});
 const design = createRoute({
   getParentRoute: () => rootRoute,
   path: '/__design',
@@ -81,7 +95,8 @@ export const routeTree = rootRoute.addChildren([
   config,
   secrets,
   tracker,
-  doctor,
+  runsIndex,
+  runReport,
   design,
 ]);
 

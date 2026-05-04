@@ -55,8 +55,13 @@ function renderPage(initialPath = '/generate') {
     validateSearch: generateSearch,
     component: () => <GeneratePage />,
   });
+  const runLegacy = createRoute({
+    getParentRoute: () => root,
+    path: '/runs/$runId',
+    component: () => null,
+  });
   const router = createRouter({
-    routeTree: root.addChildren([index]),
+    routeTree: root.addChildren([index, runLegacy]),
     history: createMemoryHistory({ initialEntries: [initialPath] }),
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -100,6 +105,7 @@ describe('GeneratePage', () => {
       if (path === '/api/stories') return stories;
       if (path === '/api/config') return { planner: { enabled: true, provider: 'anthropic' }, version: 1 };
       if (path === '/api/runs/active') return [];
+      if (path === '/api/runs') return [];
       throw new Error(`unexpected ${path}`);
     });
 
@@ -155,7 +161,7 @@ describe('GeneratePage', () => {
       }),
     );
 
-    await waitFor(() => expect(screen.getByText(/cache hit 68%/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('generate-metrics-bar')).toHaveTextContent('68%'));
     expect(screen.getByText(/src\/a\.ts/)).toBeInTheDocument();
     expect(screen.getByText(/Plan saved/)).toBeInTheDocument();
     const openLink = screen.getByRole('link', { name: 'Open' });
@@ -177,6 +183,7 @@ describe('GeneratePage', () => {
       if (path === '/api/stories') return stories;
       if (path === '/api/config') return { planner: { enabled: true }, version: 1 };
       if (path === '/api/runs/active') return [];
+      if (path === '/api/runs') return [];
       throw new Error(`unexpected ${path}`);
     });
 
@@ -226,6 +233,7 @@ describe('GeneratePage', () => {
       if (path === '/api/stories') return stories;
       if (path === '/api/config') return { planner: { enabled: true }, version: 1 };
       if (path === '/api/runs/active') return [];
+      if (path === '/api/runs') return [];
       throw new Error(`unexpected ${path}`);
     });
 
@@ -254,6 +262,7 @@ describe('GeneratePage', () => {
       if (path === '/api/stories') return stories;
       if (path === '/api/config') return { planner: { enabled: true, provider: 'anthropic' }, version: 1 };
       if (path === '/api/runs/active') return [];
+      if (path === '/api/runs') return [];
       throw new Error(`unexpected ${path}`);
     });
 
@@ -342,6 +351,7 @@ describe('GeneratePage', () => {
       if (path === '/api/stories') return stories;
       if (path === '/api/config') return { planner: { enabled: true, provider: 'anthropic' }, version: 1 };
       if (path === '/api/runs/active') return [];
+      if (path === '/api/runs') return [];
       throw new Error(`unexpected ${path}`);
     });
 

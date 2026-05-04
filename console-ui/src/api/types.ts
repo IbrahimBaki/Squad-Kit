@@ -119,3 +119,111 @@ export interface ApiLastRun {
   model: string;
   version: 1;
 }
+
+/** Wire shape parsed from SSE JSON payloads on `/api/runs/:id/stream`. */
+export interface PlannerStreamEventWire {
+  kind: string;
+  runId?: string;
+  turn?: number;
+  success?: boolean;
+  planFile?: string | null;
+  partial?: boolean;
+  message?: string;
+  waitSec?: number;
+  retryAfterSec?: number;
+  capSec?: number;
+  phase?: 'retrying' | 'aborted';
+  provider?: 'anthropic' | 'openai' | 'google';
+  rawBody?: string;
+  delta?: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
+  };
+  cacheHitRatio?: number;
+  toolCall?: { input?: Record<string, unknown>; name?: string };
+  bytesLoaded?: number;
+  totalBytes?: number;
+  toolCallId?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  durationMs?: number;
+  isError?: boolean;
+  errorSnippet?: string;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  stopReason?: string;
+  stage?: 'scout' | 'draft' | 'validation';
+  errorMessage?: string;
+  severity?: 'warning' | 'error';
+  issueKind?: 'missing_path' | 'line_range_too_large' | 'symbol_not_found' | 'malformed_metadata';
+  path?: string;
+  detail?: string;
+  excerpt?: string;
+  selected?: string[];
+  reasoning?: string;
+  model?: string;
+  runtimeKind?: 'vercel' | 'agent-sdk';
+  cacheEnabled?: boolean;
+  scoutEnabled?: boolean;
+  validationEnabled?: boolean;
+  budgetCaps?: { maxFileReads: number; maxContextBytes: number; maxDurationSeconds: number };
+  providerOptions?: {
+    anthropic?: {
+      thinking?: 'adaptive' | 'enabled' | 'disabled' | 'off';
+      effort?: 'minimal' | 'medium' | 'high';
+      effortByPhase?: { scout?: 'minimal' | 'medium' | 'high'; draft?: 'minimal' | 'medium' | 'high' };
+    };
+  };
+  blockIndex?: number;
+  tokensUsed?: number;
+  chars?: number;
+}
+
+export interface ApiRunStats {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  cacheHitRatio: number;
+  durationMs: number;
+}
+
+/** Persisted planner run (`GET /api/runs`) — aligns with `.squad/runs/<id>.json`. */
+export interface ApiRunRecord {
+  runId: string;
+  provider: string;
+  model: string;
+  feature: string;
+  storyId: string;
+  startedAt: string;
+  completedAt: string;
+  success: boolean;
+  partial: boolean;
+  planFile: string | null;
+  durationMs: number;
+  version: 1;
+  stats?: ApiRunStats;
+  cacheEnabled?: boolean;
+  validation?: {
+    enabled: boolean;
+    issuesCount: number;
+    issuesByKind?: Partial<
+      Record<'missing_path' | 'line_range_too_large' | 'symbol_not_found' | 'malformed_metadata', number>
+    >;
+    durationMs?: number;
+  };
+  plannerRuntime?: { kind: 'vercel' | 'agent-sdk'; provider: string };
+  providerOptionsSnapshot?: PlannerStreamEventWire['providerOptions'];
+}
+
+export interface ApiRunEventsPage {
+  runId: string;
+  fromIndex: number;
+  limit: number;
+  total: number;
+  events: PlannerStreamEventWire[];
+}

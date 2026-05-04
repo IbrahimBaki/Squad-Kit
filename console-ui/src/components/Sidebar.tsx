@@ -6,6 +6,7 @@ import {
   ListChecks,
   FileText,
   Sparkles,
+  History,
   Settings,
   Lock,
   KanbanSquare,
@@ -45,6 +46,7 @@ const sections: NavSection[] = [
     heading: 'Run',
     items: [
       { to: '/generate', label: 'Generate plan', Icon: Sparkles },
+      { to: '/runs', label: 'Runs', Icon: History },
     ],
   },
   {
