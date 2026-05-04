@@ -81,7 +81,6 @@ function mergePlanner(
       maxFileReads: override.budget?.maxFileReads ?? base?.budget?.maxFileReads ?? 25,
       maxContextBytes: override.budget?.maxContextBytes ?? base?.budget?.maxContextBytes ?? 50_000,
       maxDurationSeconds: override.budget?.maxDurationSeconds ?? base?.budget?.maxDurationSeconds ?? 180,
-      maxCostUsd: override.budget?.maxCostUsd ?? base?.budget?.maxCostUsd,
     },
     modelOverride: {
       ...(base?.modelOverride ?? {}),
@@ -91,6 +90,23 @@ function mergePlanner(
       enabled: override.cache?.enabled ?? base?.cache?.enabled ?? true,
     },
     maxOutputTokens: clampPlannerMaxOut(override.maxOutputTokens ?? base?.maxOutputTokens),
+    stages: {
+      scout: {
+        enabled: override.stages?.scout?.enabled ?? base?.stages?.scout?.enabled ?? true,
+        modelOverride: override.stages?.scout?.modelOverride ?? base?.stages?.scout?.modelOverride,
+        maxFiles: override.stages?.scout?.maxFiles ?? base?.stages?.scout?.maxFiles ?? 12,
+        maxOutputTokens: override.stages?.scout?.maxOutputTokens ?? base?.stages?.scout?.maxOutputTokens ?? 2048,
+      },
+    },
+    tools: {
+      grep: override.tools?.grep ?? base?.tools?.grep ?? true,
+      listDir: override.tools?.listDir ?? base?.tools?.listDir ?? true,
+      rangedRead: override.tools?.rangedRead ?? base?.tools?.rangedRead ?? true,
+    },
+    validation: {
+      enabled: override.validation?.enabled ?? base?.validation?.enabled ?? true,
+      strict: override.validation?.strict ?? base?.validation?.strict ?? false,
+    },
   };
   // Normalise: drop undefined/null entries; remove modelOverride entirely if nothing left (clean YAML).
   if (merged.modelOverride) {

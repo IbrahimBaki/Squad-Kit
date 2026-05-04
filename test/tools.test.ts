@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Budget } from '../src/planner/budget.js';
-import { readFileTool } from '../src/planner/tools.js';
+import { readFileTool } from '../src/planner/tools/index.js';
 
 let tmp: string;
 let budget: Budget;

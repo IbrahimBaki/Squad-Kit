@@ -2,28 +2,18 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runPlanner } from '../src/planner/loop.js';
+import type { LanguageModelV1StreamPart } from '@ai-sdk/provider';
+import { APICallError } from 'ai';
+import { MockLanguageModelV1, simulateReadableStream } from 'ai/test';
+import { runPlanner, buildScoutedContextSection } from '../src/planner/loop.js';
 import { PlannerEventBus, type PlannerEvent } from '../src/planner/events.js';
+import * as scoutStages from '../src/planner/stages/scout.js';
 import { Budget } from '../src/planner/budget.js';
-import { READ_FILE_TOOL } from '../src/planner/tools.js';
-import type { PlannerProvider, ProviderRequest, ProviderResponse, ToolCall } from '../src/planner/types.js';
-import { prefixOf } from '../src/planner/providers/prefix.js';
+import { READ_FILE_TOOL_NAME } from '../src/planner/tools/index.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
-
-function mockProvider(queue: ProviderResponse[]): PlannerProvider {
-  let i = 0;
-  return {
-    name: 'anthropic',
-    async send() {
-      const r = queue[i++];
-      if (!r) throw new Error('mock provider queue exhausted');
-      return r;
-    },
-  };
-}
 
 const budgetCfg = {
   maxFileReads: 25,
@@ -31,17 +21,44 @@ const budgetCfg = {
   maxDurationSeconds: 120,
 };
 
+function tok(p: number, o: number) {
+  return { promptTokens: p, completionTokens: o, totalTokens: p + o };
+}
+
+function streamOk(chunks: LanguageModelV1StreamPart[]) {
+  return {
+    stream: simulateReadableStream({ chunks }),
+    rawCall: { rawPrompt: [] as unknown[], rawSettings: {} },
+  };
+}
+
+function queueStreamModel(rounds: LanguageModelV1StreamPart[][]) {
+  let i = 0;
+  return new MockLanguageModelV1({
+    provider: 'mock',
+    modelId: 'mock-model',
+    doStream: async () => {
+      const chunks = rounds[i++];
+      if (!chunks) throw new Error('mock stream queue exhausted');
+      return streamOk(chunks);
+    },
+  });
+}
+
 describe('runPlanner', () => {
   it('returns planText and finishedNormally when assistant ends with end_turn and no tool calls', async () => {
-    const provider = mockProvider([
-      { text: '# My plan\n', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 2 } },
+    const model = queueStreamModel([
+      [
+        { type: 'text-delta', textDelta: '# My plan\n' },
+        { type: 'finish', finishReason: 'stop', usage: tok(1, 2) },
+      ],
     ]);
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget,
@@ -54,18 +71,25 @@ describe('runPlanner', () => {
 
   it('passes cacheReadTokens through onUsage unmodified', async () => {
     const onUsage = vi.fn();
-    const provider = mockProvider([
-      {
-        text: '# My plan\n',
-        stopReason: 'end_turn',
-        usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 100, cacheCreationTokens: 0 },
-      },
+    const meta = {
+      anthropic: { cacheCreationInputTokens: 0, cacheReadInputTokens: 100 },
+    };
+    const model = queueStreamModel([
+      [
+        { type: 'text-delta', textDelta: '# My plan\n' },
+        {
+          type: 'finish',
+          finishReason: 'stop',
+          usage: tok(1, 2),
+          providerMetadata: meta,
+        },
+      ],
     ]);
     await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget: new Budget(budgetCfg),
@@ -80,17 +104,29 @@ describe('runPlanner', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-loop-'));
     try {
       fs.writeFileSync(path.join(root, 'hello.txt'), 'world', 'utf8');
-      const tc: ToolCall = { id: 't1', name: READ_FILE_TOOL.name, input: { path: 'hello.txt' } };
-      const provider = mockProvider([
-        { text: 'Reading…', toolCalls: [tc], stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } },
-        { text: '# Done\n', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } },
+      const model = queueStreamModel([
+        [
+          { type: 'text-delta', textDelta: 'Reading…' },
+          {
+            type: 'tool-call',
+            toolCallType: 'function',
+            toolCallId: 't1',
+            toolName: READ_FILE_TOOL_NAME,
+            args: JSON.stringify({ path: 'hello.txt' }),
+          },
+          { type: 'finish', finishReason: 'tool-calls', usage: tok(1, 1) },
+        ],
+        [
+          { type: 'text-delta', textDelta: '# Done\n' },
+          { type: 'finish', finishReason: 'stop', usage: tok(2, 2) },
+        ],
       ]);
       const budget = new Budget(budgetCfg);
       const result = await runPlanner({
         root,
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget,
@@ -105,15 +141,18 @@ describe('runPlanner', () => {
   });
 
   it('returns finishedNormally false on max_tokens with no tool calls', async () => {
-    const provider = mockProvider([
-      { text: 'partial only', stopReason: 'max_tokens', usage: { inputTokens: 1, outputTokens: 8 } },
+    const model = queueStreamModel([
+      [
+        { type: 'text-delta', textDelta: 'partial only' },
+        { type: 'finish', finishReason: 'length', usage: tok(1, 8) },
+      ],
     ]);
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget,
@@ -124,17 +163,23 @@ describe('runPlanner', () => {
   });
 
   it('continues after max_tokens when decideOnLimit returns continue', async () => {
-    const provider = mockProvider([
-      { text: 'part-a', stopReason: 'max_tokens', usage: { inputTokens: 1, outputTokens: 1 } },
-      { text: 'part-b', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } },
+    const model = queueStreamModel([
+      [
+        { type: 'text-delta', textDelta: 'part-a' },
+        { type: 'finish', finishReason: 'length', usage: tok(1, 1) },
+      ],
+      [
+        { type: 'text-delta', textDelta: 'part-b' },
+        { type: 'finish', finishReason: 'stop', usage: tok(1, 1) },
+      ],
     ]);
     const budget = new Budget(budgetCfg);
     const decideOnLimit = vi.fn().mockResolvedValue('continue' as const);
     const result = await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget,
@@ -148,19 +193,21 @@ describe('runPlanner', () => {
   });
 
   it('throws on stopReason error with rawError and generic retry hint', async () => {
-    const provider = mockProvider([{ stopReason: 'error', rawError: 'provider exploded' }]);
+    const model = queueStreamModel([
+      [{ type: 'finish', finishReason: 'error', usage: tok(0, 0) }],
+    ]);
     const budget = new Budget(budgetCfg);
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget,
       }),
-    ).rejects.toThrow(/provider exploded[\s\S]*squad doctor[\s\S]*5xx errors are transient/);
+    ).rejects.toThrow(/planner: model reported error[\s\S]*squad doctor[\s\S]*5xx errors are transient/);
   });
 
   it('emits rate_limit phase retrying before retrying and continues when the retry succeeds', async () => {
@@ -169,21 +216,34 @@ describe('runPlanner', () => {
     const bus = new PlannerEventBus();
     const busEvents: PlannerEvent[] = [];
     bus.subscribe((ev) => busEvents.push(ev));
-    const provider = mockProvider([
-      {
-        stopReason: 'error',
-        errorKind: 'rate_limit',
-        retryAfterSec: 3,
-        rawError: 'anthropic 429: {...}',
+    let n = 0;
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        n += 1;
+        if (n === 1) {
+          throw new APICallError({
+            message: '429',
+            url: 'https://example.com',
+            requestBodyValues: {},
+            statusCode: 429,
+            responseHeaders: { 'retry-after': '3' },
+            responseBody: 'anthropic 429: {...}',
+          });
+        }
+        return streamOk([
+          { type: 'text-delta', textDelta: '# after retry\n' },
+          { type: 'finish', finishReason: 'stop', usage: tok(1, 1) },
+        ]);
       },
-      { text: '# after retry\n', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } },
-    ]);
+    });
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget,
@@ -213,15 +273,30 @@ describe('runPlanner', () => {
 
   it('honours retry-after up to the 90s cap', async () => {
     const sleepCalls: number[] = [];
-    const provider = mockProvider([
-      { stopReason: 'error', errorKind: 'rate_limit', retryAfterSec: 60, rawError: '429' },
-      { text: 'ok', stopReason: 'end_turn' },
-    ]);
+    let n = 0;
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        n += 1;
+        if (n === 1) {
+          throw new APICallError({
+            message: '429',
+            url: 'https://example.com',
+            requestBodyValues: {},
+            statusCode: 429,
+            responseHeaders: { 'retry-after': '60' },
+            responseBody: '429',
+          });
+        }
+        return streamOk([{ type: 'finish', finishReason: 'stop', usage: tok(0, 0) }]);
+      },
+    });
     await runPlanner({
       root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
+      model,
+      provider: 'anthropic',
+      modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget: new Budget(budgetCfg),
@@ -233,28 +308,31 @@ describe('runPlanner', () => {
   it('skips the retry entirely when retry-after is longer than the 90s cap', async () => {
     const sleepCalls: number[] = [];
     const onRateLimit = vi.fn();
-    const sends = vi.fn<(r: unknown) => Promise<unknown>>();
     const bus = new PlannerEventBus();
     const busEvents: PlannerEvent[] = [];
     bus.subscribe((ev) => busEvents.push(ev));
-    const provider: PlannerProvider = {
-      name: 'anthropic',
-      async send(req) {
-        sends(req);
-        return {
-          stopReason: 'error' as const,
-          errorKind: 'rate_limit' as const,
-          retryAfterSec: 132,
-          rawError: 'anthropic 429: {too-long}',
-        };
+    let sends = 0;
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        sends += 1;
+        throw new APICallError({
+          message: '429',
+          url: 'https://example.com',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '132' },
+          responseBody: 'anthropic 429: {too-long}',
+        });
       },
-    };
+    });
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget: new Budget(budgetCfg),
@@ -266,7 +344,7 @@ describe('runPlanner', () => {
     ).rejects.toThrow(/did not auto-retry[\s\S]*132s wait is longer than our 90s cap/);
     expect(sleepCalls).toEqual([]);
     expect(onRateLimit).not.toHaveBeenCalled();
-    expect(sends).toHaveBeenCalledTimes(1);
+    expect(sends).toBe(1);
     const rl = busEvents.filter((e) => e.kind === 'rate_limit');
     expect(rl).toHaveLength(1);
     expect(rl[0]).toMatchObject({
@@ -282,16 +360,26 @@ describe('runPlanner', () => {
   });
 
   it('throws an actionable rate-limit error when both attempts are rate-limited', async () => {
-    const provider = mockProvider([
-      { stopReason: 'error', errorKind: 'rate_limit', retryAfterSec: 5, rawError: 'anthropic 429: one' },
-      { stopReason: 'error', errorKind: 'rate_limit', retryAfterSec: 5, rawError: 'anthropic 429: two' },
-    ]);
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        throw new APICallError({
+          message: '429',
+          url: 'https://example.com',
+          requestBodyValues: {},
+          statusCode: 429,
+          responseHeaders: { 'retry-after': '5' },
+          responseBody: 'anthropic 429: one',
+        });
+      },
+    });
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget: new Budget(budgetCfg),
@@ -302,13 +390,19 @@ describe('runPlanner', () => {
 
   it('does not retry for a non-rate-limit error', async () => {
     const sleep = vi.fn(async () => undefined);
-    const provider = mockProvider([{ stopReason: 'error', rawError: 'boom' }]);
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        throw new Error('boom');
+      },
+    });
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget: new Budget(budgetCfg),
@@ -319,55 +413,32 @@ describe('runPlanner', () => {
   });
 
   it('preserves the model_not_found message verbatim without extra hint', async () => {
-    const canonical = 'The anthropic planner model "claude-x" is no longer available.\n...';
-    const provider = mockProvider([
-      {
-        stopReason: 'error',
-        errorKind: 'model_not_found',
-        rawError: canonical,
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        throw new APICallError({
+          message: '404',
+          url: 'https://example.com',
+          requestBodyValues: {},
+          statusCode: 404,
+          responseBody: JSON.stringify({
+            error: { type: 'not_found_error', message: 'model not_found' },
+          }),
+        });
       },
-    ]);
+    });
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'claude-x',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget: new Budget(budgetCfg),
       }),
-    ).rejects.toThrowError(canonical);
-  });
-
-  it('returns tool_result isError for unknown tool name', async () => {
-    const bodies: string[] = [];
-    const provider: PlannerProvider = {
-      name: 'anthropic',
-      async send(req) {
-        bodies.push(JSON.stringify(req.turns));
-        if (bodies.length === 1) {
-          return {
-            toolCalls: [{ id: 'x', name: 'nope', input: {} }],
-            stopReason: 'tool_use',
-          };
-        }
-        return { text: 'after', stopReason: 'end_turn' };
-      },
-    };
-    const budget = new Budget(budgetCfg);
-    const result = await runPlanner({
-      root: os.tmpdir(),
-      provider,
-      model: 'm',
-      apiKey: 'k',
-      systemPrompt: 'sys',
-      userPrompt: 'user',
-      budget,
-    });
-    expect(result.planText).toBe('after');
-    expect(bodies[1]).toContain('unknown tool');
-    expect(bodies[1]).toContain('"isError":true');
+    ).rejects.toThrowError(/The anthropic planner model "claude-x" is no longer available\.[\s\S]*squad upgrade/);
   });
 
   it('nudges model after maxFileReads exhaustion mid-batch', async () => {
@@ -375,22 +446,35 @@ describe('runPlanner', () => {
     try {
       fs.writeFileSync(path.join(root, 'a.txt'), 'a', 'utf8');
       fs.writeFileSync(path.join(root, 'b.txt'), 'b', 'utf8');
-      const provider = mockProvider([
-        {
-          toolCalls: [
-            { id: '1', name: READ_FILE_TOOL.name, input: { path: 'a.txt' } },
-            { id: '2', name: READ_FILE_TOOL.name, input: { path: 'b.txt' } },
-          ],
-          stopReason: 'tool_use',
-        },
-        { text: '# Final\n', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } },
+      const model = queueStreamModel([
+        [
+          {
+            type: 'tool-call',
+            toolCallType: 'function',
+            toolCallId: '1',
+            toolName: READ_FILE_TOOL_NAME,
+            args: JSON.stringify({ path: 'a.txt' }),
+          },
+          {
+            type: 'tool-call',
+            toolCallType: 'function',
+            toolCallId: '2',
+            toolName: READ_FILE_TOOL_NAME,
+            args: JSON.stringify({ path: 'b.txt' }),
+          },
+          { type: 'finish', finishReason: 'tool-calls', usage: tok(1, 1) },
+        ],
+        [
+          { type: 'text-delta', textDelta: '# Final\n' },
+          { type: 'finish', finishReason: 'stop', usage: tok(1, 1) },
+        ],
       ]);
       const budget = new Budget({ ...budgetCfg, maxFileReads: 1 });
       const result = await runPlanner({
         root,
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget,
@@ -402,68 +486,43 @@ describe('runPlanner', () => {
     }
   });
 
-  it('keeps cacheable request prefixes aligned across multi-turn sends (anthropic)', async () => {
-    const recorded: ProviderRequest[] = [];
-    const tc: ToolCall = { id: 't1', name: READ_FILE_TOOL.name, input: { path: 'x.txt' } };
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-loop-prefix-'));
-    fs.writeFileSync(path.join(root, 'x.txt'), 'ok', 'utf8');
-    try {
-      const provider: PlannerProvider = {
-        name: 'anthropic',
-        async send(req) {
-          recorded.push(req);
-          if (recorded.length === 1) {
-            return { text: '…', toolCalls: [tc], stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } };
-          }
-          if (recorded.length === 2) {
-            return { text: '# Plan\n', stopReason: 'end_turn', usage: { inputTokens: 2, outputTokens: 2 } };
-          }
-          return { text: '', stopReason: 'end_turn' };
-        },
-      };
-      await runPlanner({
-        root,
-        provider,
-        model: 'm',
-        apiKey: 'k',
-        systemPrompt: 'sys',
-        userPrompt: 'user',
-        budget: new Budget(budgetCfg),
-      });
-      expect(recorded.length).toBe(2);
-      const p0 = prefixOf('anthropic', recorded[0]!);
-      const p1 = prefixOf('anthropic', recorded[1]!);
-      expect(p1.startsWith(p0)).toBe(true);
-      expect(p1.slice(0, p0.length)).toBe(p0);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it('returns timedOut when budget times out before completing', async () => {
-    vi.useFakeTimers({ now: 1_000 });
+    // Fake only `Date` so `setTimeout` inside the AI SDK stream still runs.
+    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
     const budget = new Budget({ ...budgetCfg, maxDurationSeconds: 1 });
-    const tc: ToolCall = { id: 't1', name: READ_FILE_TOOL.name, input: { path: 'x.txt' } };
+    let call = 0;
+    const model = new MockLanguageModelV1({
+      provider: 'mock',
+      modelId: 'm',
+      doStream: async () => {
+        call += 1;
+        if (call === 1) {
+          vi.setSystemTime(3_500);
+          return streamOk([
+            {
+              type: 'tool-call',
+              toolCallType: 'function',
+              toolCallId: 't1',
+              toolName: READ_FILE_TOOL_NAME,
+              args: JSON.stringify({ path: 'x.txt' }),
+            },
+            { type: 'finish', finishReason: 'tool-calls', usage: tok(0, 0) },
+          ]);
+        }
+        return streamOk([
+          { type: 'text-delta', textDelta: 'never' },
+          { type: 'finish', finishReason: 'stop', usage: tok(0, 0) },
+        ]);
+      },
+    });
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-loop-to-'));
     fs.writeFileSync(path.join(root, 'x.txt'), 'ok', 'utf8');
     try {
-      let n = 0;
-      const provider: PlannerProvider = {
-        name: 'anthropic',
-        async send() {
-          n += 1;
-          if (n === 1) {
-            vi.setSystemTime(3_500);
-            return { toolCalls: [tc], stopReason: 'tool_use' };
-          }
-          return { text: 'never', stopReason: 'end_turn' };
-        },
-      };
       const result = await runPlanner({
         root,
-        provider,
-        model: 'm',
-        apiKey: 'k',
+        model,
+        provider: 'anthropic',
+        modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget,
@@ -474,5 +533,95 @@ describe('runPlanner', () => {
       vi.useRealTimers();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('buildScoutedContextSection', () => {
+  it('honours readRanges for hinted paths', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-loop-scoutctx-'));
+    try {
+      fs.writeFileSync(path.join(root, 'x.ts'), ['aaa', 'bbb', 'ccc', 'ddd'].join('\n'), 'utf8');
+      const budget = new Budget(budgetCfg);
+      const bus = new PlannerEventBus();
+      const md = buildScoutedContextSection(
+        root,
+        budget,
+        ['x.ts'],
+        bus,
+        'rid',
+        [{ path: 'x.ts', offset: 2, limit: 2 }],
+      );
+      expect(md).toContain('lines 2–3');
+      expect(md).toContain('bbb');
+      expect(md).toContain('ccc');
+      expect(md).not.toContain('aaa');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('truncates oversized files with head read note', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-loop-big-'));
+    try {
+      const body = 'z'.repeat(33_000);
+      fs.writeFileSync(path.join(root, 'big.txt'), body, 'utf8');
+      const budget = new Budget(budgetCfg);
+      const bus = new PlannerEventBus();
+      const md = buildScoutedContextSection(root, budget, ['big.txt'], bus, 'rid');
+      expect(md).toContain('truncated:');
+      expect(md).toContain('full size');
+      expect(md).toContain(`${33_000}`);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runPlanner scout configuration', () => {
+  it('throws when scout enabled with model but scoutSystemPrompt empty', async () => {
+    const draftModel = queueStreamModel([[{ type: 'finish', finishReason: 'stop', usage: tok(1, 1) }]]);
+    await expect(
+      runPlanner({
+        root: os.tmpdir(),
+        model: draftModel,
+        provider: 'anthropic',
+        modelId: 'm',
+        systemPrompt: 'sys',
+        userPrompt: 'user',
+        budget: new Budget(budgetCfg),
+        stages: { scout: { enabled: true, model: draftModel, modelId: 'scout' } },
+        scoutSystemPrompt: '   ',
+      }),
+    ).rejects.toThrow(/scoutSystemPrompt/);
+  });
+
+  it('emits stage_complete with errorMessage when scout throws', async () => {
+    vi.spyOn(scoutStages, 'runScout').mockRejectedValue(new Error('scout boom'));
+    const bus = new PlannerEventBus();
+    const events: PlannerEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const draftModel = queueStreamModel([[{ type: 'finish', finishReason: 'stop', usage: tok(1, 1) }]]);
+    await runPlanner({
+      root: os.tmpdir(),
+      model: draftModel,
+      provider: 'anthropic',
+      modelId: 'm',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      budget: new Budget(budgetCfg),
+      stages: { scout: { enabled: true, model: draftModel, modelId: 'scout' } },
+      scoutSystemPrompt: 'scout sys',
+      events: bus,
+    });
+    expect(
+      events.some(
+        (e) =>
+          e.kind === 'stage_complete' &&
+          e.stage === 'scout' &&
+          !e.success &&
+          'errorMessage' in e &&
+          (e as { errorMessage?: string }).errorMessage?.includes('scout boom'),
+      ),
+    ).toBe(true);
   });
 });

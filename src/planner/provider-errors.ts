@@ -1,3 +1,4 @@
+import type { APICallError } from 'ai';
 import type { ProviderName } from './types.js';
 
 export interface ModelNotFoundError {
@@ -58,6 +59,16 @@ export interface RateLimitError {
 }
 
 /**
+ * Map a failed SDK HTTP call into the same `detectRateLimit` shape our loop already handles.
+ */
+export function detectRateLimitFromAPICallError(
+  provider: ProviderName,
+  err: APICallError,
+): RateLimitError | undefined {
+  return detectRateLimit(provider, err.statusCode ?? 0, err.responseHeaders ?? {}, err.responseBody ?? '');
+}
+
+/**
  * Detect a 429 rate-limit response. Returns a `RateLimitError` when the status is 429,
  * populating `retryAfterSec` from the `Retry-After` header (seconds or HTTP-date) or from
  * Google's body-level `retryDelay: "30s"` field. Returns `undefined` for any other status.
@@ -77,16 +88,22 @@ export function detectRateLimit(
   };
 }
 
-function parseRetryAfter(headers: HeadersLike, body: string): number | undefined {
+/** Seconds until retry from `Retry-After` header only (HTTP-date or delta-seconds). */
+export function parseRetryAfterSec(headers: HeadersLike): number | undefined {
   const raw = headerGet(headers, 'retry-after');
-  if (raw) {
-    const sec = Number(raw);
-    if (Number.isFinite(sec) && sec >= 0) return Math.ceil(sec);
-    const asDate = Date.parse(raw);
-    if (Number.isFinite(asDate)) {
-      return Math.max(0, Math.ceil((asDate - Date.now()) / 1000));
-    }
+  if (!raw) return undefined;
+  const sec = Number(raw);
+  if (Number.isFinite(sec) && sec >= 0) return Math.ceil(sec);
+  const asDate = Date.parse(raw);
+  if (Number.isFinite(asDate)) {
+    return Math.max(0, Math.ceil((asDate - Date.now()) / 1000));
   }
+  return undefined;
+}
+
+function parseRetryAfter(headers: HeadersLike, body: string): number | undefined {
+  const fromHeader = parseRetryAfterSec(headers);
+  if (fromHeader !== undefined) return fromHeader;
   const bodyMatch = /"retryDelay"\s*:\s*"(\d+)(?:\.\d+)?s"/i.exec(body);
   if (bodyMatch) {
     const sec = Number(bodyMatch[1]);

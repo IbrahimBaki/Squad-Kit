@@ -6,7 +6,6 @@ export type PlannerSessionLimitKind =
   | 'max_output_tokens'
   | 'max_iterations'
   | 'wall_clock'
-  | 'cost_cap'
   | 'file_or_context_reads';
 
 export type PlannerLimitDecision = 'continue' | 'cancel';

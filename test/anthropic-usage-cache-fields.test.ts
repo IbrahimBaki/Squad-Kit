@@ -1,47 +1,21 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { callAnthropic } from '../src/planner/providers/anthropic.js';
-import type { ProviderRequest } from '../src/planner/types.js';
+import { describe, it, expect } from 'vitest';
+import { usageFromLanguageModelStep } from '../src/planner/usage-map.js';
+import type { LanguageModelUsage } from 'ai';
 
-beforeEach(() => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(() => Promise.reject(new Error('fetch must be stubbed in this test'))) as typeof fetch,
-  );
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
-const req: ProviderRequest = {
-  systemPrompt: 's',
-  model: 'm',
-  tools: [],
-  turns: [],
-  apiKey: 'k',
-};
-
-describe('callAnthropic usage cache fields', () => {
-  it('maps cache_creation_input_tokens and cache_read_input_tokens', async () => {
-    const fetchMock = vi.fn(async () => {
-      return new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: 'ok' }],
-          stop_reason: 'end_turn',
-          usage: {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_creation_input_tokens: 2000,
-            cache_read_input_tokens: 800,
-          },
-        }),
-        { status: 200 },
-      );
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const res = await callAnthropic(req);
-    expect(res.usage).toEqual({
+describe('usageFromLanguageModelStep (Anthropic cache fields)', () => {
+  it('maps cacheCreationInputTokens and cacheReadInputTokens from provider metadata', () => {
+    const usage: LanguageModelUsage = {
+      promptTokens: 100,
+      completionTokens: 50,
+      totalTokens: 150,
+    };
+    const meta = {
+      anthropic: {
+        cacheCreationInputTokens: 2000,
+        cacheReadInputTokens: 800,
+      },
+    };
+    expect(usageFromLanguageModelStep(usage, meta)).toEqual({
       inputTokens: 100,
       outputTokens: 50,
       cacheCreationTokens: 2000,
@@ -49,25 +23,15 @@ describe('callAnthropic usage cache fields', () => {
     });
   });
 
-  it('treats missing cache fields as zero', async () => {
-    const fetchMock = vi.fn(async () => {
-      return new Response(
-        JSON.stringify({
-          content: [{ type: 'text', text: 'ok' }],
-          stop_reason: 'end_turn',
-          usage: { input_tokens: 10, output_tokens: 5 },
-        }),
-        { status: 200 },
-      );
-    });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const res = await callAnthropic(req);
-    expect(res.usage).toEqual({
+  it('treats missing cache fields as zero', () => {
+    const usage: LanguageModelUsage = {
+      promptTokens: 10,
+      completionTokens: 5,
+      totalTokens: 15,
+    };
+    expect(usageFromLanguageModelStep(usage, undefined)).toEqual({
       inputTokens: 10,
       outputTokens: 5,
-      cacheCreationTokens: 0,
-      cacheReadTokens: 0,
     });
   });
 });

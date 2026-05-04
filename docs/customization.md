@@ -76,12 +76,28 @@ planner:
     maxFileReads: 25
     maxContextBytes: 50000
     maxDurationSeconds: 180
-    # maxCostUsd: <optional cap when the provider reports cost>
 ```
 
 If the planner hits a cap mid-run, the CLI still writes partial output and warns. Raise limits carefully — the point of squad-kit is to **bound** work, not map the whole monorepo. For hand-edits, run **`squad doctor`** after changing numbers (it validates **> 0**).
 
-`maxCostUsd` is optional: when the provider returns usage cost and you set a cap, the run can stop early. Most setups rely on the read/time caps instead.
+### Multi-stage planner (`squad new-plan --api`)
+
+When the direct API planner runs, squad-kit uses a **pipeline** by default:
+
+1. **Scout** — a **cheap-tier** model reads the intake and repo tree, then returns a ranked list of files to preload for the drafter.
+2. **Draft** — your configured **plan** model writes the plan with the tool loop (`list_dir`, `grep`, `read_file` including ranged reads).
+3. **Validation** — an LLM-free pass flags likely problems: missing paths, line ranges past EOF, and simple symbol checks. Treat findings as **warnings** to investigate; the rules are heuristic.
+
+**Cost:** the scout uses the small model id for your provider; **`planner.modelOverride` applies to the draft only**. Override the scout with **`--scout-model`** or **`planner.stages.scout.modelOverride`**.
+
+**Disable or tighten:**
+
+- **`--no-scout`** / **`planner.stages.scout.enabled: false`** — skip scout (draft-only, closer to older behaviour).
+- **`--no-validation`** / **`planner.validation.enabled: false`** — skip validation.
+- **`--strict-validation`** / **`planner.validation.strict: true`** — write **`*.partial.md`** when validation reports issues.
+- **`planner.tools`** — toggle `grep`, `listDir`, `rangedRead` individually.
+
+**Eval without API cost:** in a dev checkout, `pnpm eval:offline` re-validates existing plans under `.squad/plans/` (see `test/eval/run-eval-offline.ts`).
 
 ## Prompt caching
 

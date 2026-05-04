@@ -15,10 +15,10 @@ import {
   printPlannerLimitExplanation,
   printPlannerLimitNextSteps,
 } from '../planner/planner-limit-messages.js';
-import { providerFor } from '../planner/providers/index.js';
+import { resolveModel } from '../planner/providers/index.js';
 import { Budget } from '../planner/budget.js';
 import { buildRepoMap } from '../core/repo-map.js';
-import { composeSystemPrompt, composeUserPrompt } from '../planner/system-prompt.js';
+import { composeSystemPrompt, composeUserPrompt, composeScoutSystemPrompt } from '../planner/system-prompt.js';
 import { writePlanFile, buildMetadataHeader } from '../planner/writer.js';
 import { buildCopyPlanPromptMarkdown } from '../core/copy-plan-prompt.js';
 import { modelFor, providerEnvVar, readProviderKey } from '../core/planner-models.js';
@@ -26,6 +26,8 @@ import { writeLastRun } from '../core/last-run.js';
 import { appendRun, newRunId } from '../core/runs.js';
 import { formatPlannerCacheLine } from '../ui/planner-cache-summary.js';
 import { PlannerEventBus } from '../planner/events.js';
+import { buildPlansIndex } from '../core/plans-index.js';
+import { summariseIssuesByKind } from '../planner/validation.js';
 
 export interface NewPlanOptions {
   /** Default true; `--no-clipboard` sets false (copy-paste mode only). */
@@ -36,6 +38,15 @@ export interface NewPlanOptions {
   all?: boolean;
   yes?: boolean;
   api?: boolean;
+  /** Disable cheap scout stage (single-stage draft only). */
+  noScout?: boolean;
+  /** Override scout model id. */
+  scoutModel?: string;
+  maxScoutFiles?: number;
+  /** Disable post-plan validation pass. */
+  noValidation?: boolean;
+  /** Write `*.partial.md` when validation reports issues. */
+  strictValidation?: boolean;
 }
 
 function decideMode(opts: NewPlanOptions, config: SquadConfig): 'api' | 'copy' {
@@ -189,14 +200,14 @@ async function emitViaApi(
     );
   }
 
-  const model = modelFor(planner.provider, 'plan', planner.modelOverride);
-  const provider = providerFor(planner.provider);
+  const modelId = modelFor(planner.provider, 'plan', planner.modelOverride);
+  const { model } = resolveModel(planner.provider, modelId, apiKey);
   const budget = new Budget(planner.budget);
 
   ui.banner();
   ui.step(`planning   ${story.feature} / ${story.id}`);
   ui.kv('provider', planner.provider);
-  ui.kv('model', model);
+  ui.kv('model', modelId);
   ui.kv(
     'budget',
     `${planner.budget.maxFileReads} reads · ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB · ${planner.budget.maxDurationSeconds}s`,
@@ -209,7 +220,7 @@ async function emitViaApi(
   }
 
   const mapSpinner = ui.spinner('building repo map…');
-  const repoMap = buildRepoMap(paths.root);
+  const repoMap = buildRepoMap(paths.root, { format: 'tree' });
   mapSpinner.succeed(
     `repo map ready  (${repoMap.split('\n').length - 1} paths · ${(repoMap.length / 1024).toFixed(1)} KB)`,
   );
@@ -224,6 +235,31 @@ async function emitViaApi(
   });
   const userPrompt = composeUserPrompt({ intakeContent: readFile(story.intakePath) });
 
+  const scoutEnabled = !opts.noScout && planner.stages?.scout?.enabled !== false;
+  const validationEnabled = !opts.noValidation && planner.validation?.enabled !== false;
+  const strictValidation = !!opts.strictValidation || planner.validation?.strict === true;
+  const maxScoutFiles = opts.maxScoutFiles ?? planner.stages?.scout?.maxFiles ?? 12;
+
+  let scoutModelId = '';
+  let scoutModelHandle: ReturnType<typeof resolveModel>['model'] | undefined;
+  let scoutSystemPrompt: string | undefined;
+  if (scoutEnabled) {
+    scoutModelId = modelFor(
+      planner.provider,
+      'scout',
+      planner.modelOverride,
+      opts.scoutModel ?? planner.stages?.scout?.modelOverride,
+    );
+    scoutModelHandle = resolveModel(planner.provider, scoutModelId, apiKey).model;
+    scoutSystemPrompt = composeScoutSystemPrompt({
+      projectRoots: config.project.projectRoots ?? ['.'],
+      primaryLanguage: config.project.primaryLanguage ?? '',
+      trackerType: config.tracker.type,
+      repoMap,
+      plansIndex: buildPlansIndex(paths),
+    });
+  }
+
   const sessionSpinner: { current: ReturnType<typeof ui.spinner> | null } = { current: null };
   const startedAt = Date.now();
   const cacheEnabled = planner.cache?.enabled ?? true;
@@ -232,11 +268,43 @@ async function emitViaApi(
   const unsubscribe = bus.subscribe((e) => {
     switch (e.kind) {
       case 'tool_call': {
-        const p = (e.toolCall.input as { path?: string }).path ?? '<unknown>';
+        const name = e.toolCall.name;
+        const inp = e.toolCall.input as Record<string, unknown>;
+        let label: string;
+        if (name === 'read_file') {
+          label = `read ${String(inp.path ?? '<unknown>')}`;
+        } else if (name === 'grep') {
+          label = `grep ${String(inp.pattern ?? '?').slice(0, 48)}`;
+        } else if (name === 'list_dir') {
+          label = `list_dir ${String(inp.path ?? '?')}`;
+        } else {
+          label = name;
+        }
         sessionSpinner.current?.succeed(
-          `read ${p}  (${(e.bytesLoaded / 1024).toFixed(1)} KB · ${(e.totalBytes / 1024).toFixed(1)} KB / ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB)`,
+          `${label}  (${(e.bytesLoaded / 1024).toFixed(1)} KB · ${(e.totalBytes / 1024).toFixed(1)} KB / ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB)`,
         );
-        sessionSpinner.current = ui.spinner('reading next file…');
+        sessionSpinner.current = ui.spinner('next tool…');
+        break;
+      }
+      case 'stage_started': {
+        sessionSpinner.current?.stop();
+        if (e.stage === 'scout') sessionSpinner.current = ui.spinner('scouting…');
+        else if (e.stage === 'draft') sessionSpinner.current = ui.spinner('drafting…');
+        else if (e.stage === 'validation') sessionSpinner.current = ui.spinner('validating…');
+        break;
+      }
+      case 'stage_complete': {
+        if (!e.success && e.errorMessage && e.stage === 'scout') {
+          sessionSpinner.current?.stop();
+          ui.warning(`scout stage failed: ${e.errorMessage}`);
+        }
+        break;
+      }
+      case 'scout_result': {
+        const preview = e.selected.slice(0, 4).join(', ');
+        const more = e.selected.length > 4 ? '…' : '';
+        sessionSpinner.current?.succeed(`scout picked ${e.selected.length} files: ${preview}${more}`);
+        sessionSpinner.current = ui.spinner('drafting…');
         break;
       }
       case 'assistant_text':
@@ -276,9 +344,9 @@ async function emitViaApi(
   try {
     result = await runPlanner({
       root: paths.root,
-      provider,
       model,
-      apiKey,
+      provider: planner.provider,
+      modelId,
       systemPrompt,
       userPrompt,
       budget,
@@ -287,6 +355,18 @@ async function emitViaApi(
       decideOnLimit,
       events: bus,
       runId,
+      stages: {
+        scout: {
+          enabled: scoutEnabled,
+          model: scoutModelHandle,
+          modelId: scoutModelId,
+          maxFiles: maxScoutFiles,
+          maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
+        },
+      },
+      validation: { enabled: validationEnabled, strict: strictValidation },
+      toolsEnabled: planner.tools,
+      scoutSystemPrompt,
     });
   } finally {
     unsubscribe();
@@ -301,18 +381,28 @@ async function emitViaApi(
 
   const snap = budget.snapshot();
   const elapsedMs = Date.now() - startedAt;
-  const success = result.finishedNormally && !result.timedOut && !result.userCancelled;
+  const issueCount = result.validation?.issues.length ?? 0;
+  const issuesByKind = summariseIssuesByKind(result.validation?.issues ?? []);
+  const validationBlocks =
+    strictValidation && validationEnabled && issueCount > 0;
+  const success =
+    result.finishedNormally &&
+    !result.timedOut &&
+    !result.userCancelled &&
+    !validationBlocks;
 
   const header = buildMetadataHeader({
     provider: planner.provider,
-    model,
+    model: modelId,
     reads: snap.reads,
     bytes: snap.bytes,
     inputTokens: snap.usage.inputTokens,
     outputTokens: snap.usage.outputTokens,
     durationMs: elapsedMs,
-    costUsd: snap.usage.costUsd,
     planStatus: success ? undefined : 'partial',
+    scoutEnabled,
+    validationEnabled,
+    validationIssueCount: issueCount,
   });
 
   const { planFile, sequenceNumber, overwrote } = writePlanFile({
@@ -331,12 +421,12 @@ async function emitViaApi(
       stats: result.stats,
       completedAt: new Date().toISOString(),
       provider: planner.provider,
-      model,
+      model: modelId,
     });
     await appendRun(paths, {
       runId,
       provider: planner.provider,
-      model,
+      model: modelId,
       feature: story.feature,
       storyId: story.id,
       startedAt: new Date(startedAt).toISOString(),
@@ -347,6 +437,18 @@ async function emitViaApi(
       stats: result.stats,
       cacheEnabled,
       durationMs: elapsedMs,
+      scout: {
+        enabled: scoutEnabled,
+        selectedCount: result.scout?.selected.length,
+        tokensUsed: result.scout?.tokensUsed,
+        durationMs: result.scout?.durationMs,
+      },
+      validation: {
+        enabled: validationEnabled,
+        issuesCount: issueCount,
+        issuesByKind,
+        durationMs: result.validation?.durationMs,
+      },
     });
   } catch {
     // best-effort telemetry
@@ -355,11 +457,21 @@ async function emitViaApi(
   ui.summaryBox(success ? ' plan generated ' : ' plan saved (incomplete) ', [
     { key: 'file', value: relPlan },
     { key: 'nn', value: String(sequenceNumber).padStart(2, '0') },
-    { key: 'model', value: `${planner.provider}/${model}` },
+    { key: 'model', value: `${planner.provider}/${modelId}` },
+    {
+      key: 'scout',
+      value: scoutEnabled
+        ? `${result.scout?.selected.length ?? 0} files · ${result.scout?.tokensUsed ?? 0} tok`
+        : 'disabled',
+    },
+    {
+      key: 'validation',
+      value: validationEnabled ? `${issueCount} issue(s)` : 'disabled',
+    },
     { key: 'reads', value: `${snap.reads} files · ${(snap.bytes / 1024).toFixed(1)} KB` },
     {
       key: 'tokens',
-      value: `${snap.usage.inputTokens} in · ${snap.usage.outputTokens} out${snap.usage.costUsd !== undefined ? `  ≈ $${snap.usage.costUsd.toFixed(2)}` : ''}`,
+      value: `${snap.usage.inputTokens} in · ${snap.usage.outputTokens} out`,
     },
     { key: 'cache', value: formatPlannerCacheLine({ cacheEnabled, stats: result.stats }) },
     {
@@ -373,12 +485,35 @@ async function emitViaApi(
         ? overwrote
           ? 'overwrote existing plan'
           : 'new plan'
-        : 'partial plan (review limits)',
+        : validationBlocks
+          ? 'partial plan (validation issues — review or use --no-validation)'
+          : 'partial plan (review limits)',
     },
   ]);
 
+  if (issueCount > 0 && validationEnabled) {
+    ui.blank();
+    ui.warning(`Validation reported ${issueCount} issue(s) (heuristic; first 10 shown):`);
+    for (const iss of result.validation!.issues.slice(0, 10)) {
+      ui.info(
+        `  [${iss.severity}] ${iss.kind}${iss.path ? ` ${iss.path}` : ''} — ${iss.detail}`,
+      );
+    }
+    if (issueCount > 10) {
+      ui.info(`  (+${issueCount - 10} more — see metadata header issues=…)`);
+    }
+    if (issueCount > 50) {
+      ui.warning('Large issue count may mean the validator is misfiring; try `squad new-plan --no-validation` to compare.');
+    }
+  }
+
   if (!success) {
-    printPlannerRunIncompleteSummary(result, relPlan);
+    if (!validationBlocks || !result.finishedNormally) {
+      printPlannerRunIncompleteSummary(result, relPlan);
+    } else {
+      ui.blank();
+      ui.warning('Plan saved as partial because strict validation reported issues.');
+    }
     throw new SquadExit(2);
   }
 

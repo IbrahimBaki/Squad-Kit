@@ -72,7 +72,7 @@ Vague guidance ("consider introducing a service layer") does not belong here. Th
 
 ## What squad-kit gives up
 
-The in-agent and direct planner paths **share** the same bundled `generate-plan.md` rules; they differ only in **who** reads the repo and **how** reads are bounded. Neither path adds a second “planning pass” before execution — the implementation turn still starts from a single artefact.
+The in-agent and direct planner paths **share** the same bundled `generate-plan.md` rules; they differ only in **who** reads the repo and **how** reads are bounded. **`squad new-plan --api`** may run an internal **scout → draft → validation** pipeline (cheap scout model, then your plan model, then a heuristic validator). That is still **one** user-facing planning pass: you get **one** plan file to attach for implementation — it does not violate “plan once, execute cheap.” Neither path adds a second human artifact before execution — the implementation turn still starts from a single artefact.
 
 Spec-Kit's `/clarify` and `/analyze` catch planning mistakes before implementation. Squad-kit does not have those. The tradeoff:
 

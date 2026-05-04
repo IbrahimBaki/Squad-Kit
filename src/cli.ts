@@ -92,6 +92,15 @@ program
   .option('-y, --yes', 'Skip confirmation prompts', false)
   .option('--api', 'Force direct planner API (fails if not configured)', false)
   .option('--copy', 'Force copy-paste mode even when planner API is configured', false)
+  .option('--no-scout', 'Disable the scout stage (draft only)', false)
+  .option('--scout-model <id>', 'Override scout model id (cheap tier default from PLANNER_MODEL_MAP)')
+  .option(
+    '--max-scout-files <n>',
+    'Maximum files the scout can pre-select (default from config or 12)',
+    (v) => parseInt(v, 10),
+  )
+  .option('--no-validation', 'Disable post-write validation', false)
+  .option('--strict-validation', 'Write partial plan when validation finds issues', false)
   .action(wrapArgs(runNewPlan));
 
 program.command('status').description('Show squad-kit workspace status').action(wrap(runStatus));

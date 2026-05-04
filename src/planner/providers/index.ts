@@ -1,17 +1,23 @@
-import type { PlannerProvider, ProviderName } from '../types.js';
-import { anthropicProvider } from './anthropic.js';
-import { openaiProvider } from './openai.js';
-import { googleProvider } from './google.js';
+import type { LanguageModelV1 } from 'ai';
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import type { ProviderName } from '../types.js';
 
-export function providerFor(name: ProviderName): PlannerProvider {
-  switch (name) {
-    case 'anthropic':
-      return anthropicProvider;
-    case 'openai':
-      return openaiProvider;
-    case 'google':
-      return googleProvider;
-  }
+export interface ResolvedModel {
+  provider: ProviderName;
+  model: LanguageModelV1;
+  /** Model id used in plan headers and telemetry (same string passed in). */
+  modelId: string;
 }
 
-export { anthropicProvider, openaiProvider, googleProvider };
+export function resolveModel(provider: ProviderName, modelId: string, apiKey: string): ResolvedModel {
+  switch (provider) {
+    case 'anthropic':
+      return { provider, model: createAnthropic({ apiKey })(modelId), modelId };
+    case 'openai':
+      return { provider, model: createOpenAI({ apiKey })(modelId), modelId };
+    case 'google':
+      return { provider, model: createGoogleGenerativeAI({ apiKey })(modelId), modelId };
+  }
+}

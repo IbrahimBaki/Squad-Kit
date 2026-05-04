@@ -1,4 +1,4 @@
-export type PlannerPhase = 'plan' | 'execute';
+export type PlannerPhase = 'plan' | 'execute' | 'scout';
 
 export type ProviderName = 'anthropic' | 'openai' | 'google';
 
@@ -10,6 +10,22 @@ export interface PlannerModelOverride {
 
 export interface PlannerCacheConfig {
   enabled: boolean;
+}
+
+export interface PlannerStagesConfig {
+  scout?: { enabled?: boolean; modelOverride?: string; maxFiles?: number; maxOutputTokens?: number };
+}
+
+export interface PlannerToolsConfig {
+  grep?: boolean;
+  listDir?: boolean;
+  rangedRead?: boolean;
+}
+
+export interface PlannerValidationConfig {
+  enabled?: boolean;
+  /** When true, plans with validation issues are written as `*.partial.md`. */
+  strict?: boolean;
 }
 
 export interface PlannerConfig {
@@ -38,6 +54,10 @@ export interface PlannerConfig {
    * Anthropic/OpenAI/Google each enforce their own upper bounds.
    */
   maxOutputTokens?: number;
+  /** Multi-stage planner: cheap scout pre-ranks files before the draft model runs. */
+  stages?: PlannerStagesConfig;
+  tools?: PlannerToolsConfig;
+  validation?: PlannerValidationConfig;
 }
 
 export interface PlannerRunStats {
@@ -55,7 +75,6 @@ export interface BudgetConfig {
   maxFileReads: number;
   maxContextBytes: number;
   maxDurationSeconds: number;
-  maxCostUsd?: number;
 }
 
 export interface ToolSchema {
@@ -72,6 +91,8 @@ export interface ToolCall {
 
 export interface ToolResult {
   toolCallId: string;
+  /** Matches the original ToolCall.name (grep, list_dir, read_file, …). */
+  name: string;
   content: string;
   isError?: boolean;
 }
@@ -83,22 +104,6 @@ export interface ChatTurn {
   text?: string;
   toolCalls?: ToolCall[];
   toolResults?: ToolResult[];
-}
-
-export interface ProviderRequest {
-  systemPrompt: string;
-  model: string;
-  tools: ToolSchema[];
-  turns: ChatTurn[];
-  maxOutputTokens?: number;
-  apiKey: string;
-  /** When set, passed to provider `fetch` for cancellation mid-request. */
-  abort?: AbortSignal;
-  /**
-   * When `false`, Anthropic requests omit `cache_control` and use a string `system` (legacy
-   * wire shape). Omitted or `true` enables prompt-cache markers. Other providers ignore this.
-   */
-  cacheEnabled?: boolean;
 }
 
 export type ProviderErrorKind = 'rate_limit' | 'model_not_found' | 'unknown';
@@ -122,14 +127,8 @@ export interface ProviderResponse {
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
-  costUsd?: number;
   /** Tokens written into the provider cache on this turn (first time this prefix was seen). */
   cacheCreationTokens?: number;
   /** Tokens served from the provider cache on this turn (not billed at full rate, does not count ITPM). */
   cacheReadTokens?: number;
-}
-
-export interface PlannerProvider {
-  readonly name: ProviderName;
-  send(req: ProviderRequest): Promise<ProviderResponse>;
 }

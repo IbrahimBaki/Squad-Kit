@@ -154,7 +154,7 @@ describe('writePlanFile', () => {
 });
 
 describe('buildMetadataHeader', () => {
-  it('includes provider, model, ISO timestamp, reads, KB, tokens, and optional cost', () => {
+  it('includes provider, model, ISO timestamp, reads, KB, and tokens', () => {
     const h = buildMetadataHeader({
       provider: 'anthropic',
       model: 'claude-x',
@@ -163,7 +163,6 @@ describe('buildMetadataHeader', () => {
       inputTokens: 10,
       outputTokens: 20,
       durationMs: 1000,
-      costUsd: 0.42,
     });
     expect(h.startsWith('<!-- squad-kit:')).toBe(true);
     expect(h).toContain('anthropic/claude-x');
@@ -171,6 +170,5 @@ describe('buildMetadataHeader', () => {
     expect(h).toContain('3 reads');
     expect(h).toContain('4.0 KB context');
     expect(h).toContain('10 in / 20 out');
-    expect(h).toContain('~$0.42');
   });
 });

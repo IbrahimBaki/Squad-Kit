@@ -32,7 +32,6 @@ type SquadConfig = {
       maxFileReads: number;
       maxContextBytes: number;
       maxDurationSeconds: number;
-      maxCostUsd?: number;
     };
     modelOverride?: { anthropic?: string; openai?: string; google?: string };
     cache?: { enabled: boolean };
@@ -389,26 +388,6 @@ export function ConfigPage() {
                           />
                         )}
                       </Field>
-                      <div className="sm:col-span-2">
-                        <Field label="Max cost USD (optional)">
-                          {({ id, helperId }) => (
-                            <Input
-                              id={id}
-                              aria-describedby={helperId}
-                              type="number"
-                              step="0.01"
-                              value={p.budget.maxCostUsd ?? ''}
-                              onChange={(e) => {
-                                const v = e.target.value;
-                                setPlanner({
-                                  ...p,
-                                  budget: { ...p.budget, maxCostUsd: v === '' ? undefined : Number(v) },
-                                });
-                              }}
-                            />
-                          )}
-                        </Field>
-                      </div>
                       <label className="flex items-center gap-2 text-sm sm:col-span-2">
                         <input
                           type="checkbox"

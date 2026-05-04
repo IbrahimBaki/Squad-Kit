@@ -6,6 +6,7 @@ import type { PlannerModelOverride, PlannerPhase, ProviderName } from '../planne
 export interface PlannerPhaseModels {
   plan: string;
   execute: string;
+  scout: string;
 }
 
 /**
@@ -20,16 +21,19 @@ export const PLANNER_MODEL_MAP: Record<ProviderName, PlannerPhaseModels> = {
   anthropic: {
     plan: 'claude-opus-4-7',
     execute: 'claude-haiku-4-5-20251001',
+    scout: 'claude-haiku-4-5-20251001',
   },
   openai: {
     // Unverified for 0.2.0. 0.2.1 will pin to dated snapshots once a maintainer can probe.
     plan: 'gpt-5.3-thinking',
     execute: 'gpt-5.3-mini',
+    scout: 'gpt-5.3-mini',
   },
   google: {
     // Unverified for 0.2.0. 0.2.1 will pin to dated snapshots once a maintainer can probe.
     plan: 'gemini-3-pro-latest',
     execute: 'gemini-3-flash-latest',
+    scout: 'gemini-3-flash-latest',
   },
 };
 
@@ -37,8 +41,11 @@ export function modelFor(
   provider: ProviderName,
   phase: PlannerPhase,
   override?: PlannerModelOverride,
+  /** Draft-phase `modelOverride` does not apply to scout; use this or `planner.stages.scout.modelOverride`. */
+  scoutModelId?: string,
 ): string {
   if (phase === 'plan' && override?.[provider]) return override[provider]!;
+  if (phase === 'scout' && scoutModelId?.trim()) return scoutModelId.trim();
   return PLANNER_MODEL_MAP[provider][phase];
 }
 

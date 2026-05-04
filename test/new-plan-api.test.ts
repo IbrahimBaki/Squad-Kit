@@ -2,21 +2,38 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { LanguageModelV1StreamPart } from '@ai-sdk/provider';
 import { buildPaths, SQUAD_DIR } from '../src/core/paths.js';
 import { DEFAULT_CONFIG, saveConfig } from '../src/core/config.js';
 import { SquadExit } from '../src/core/cli-exit.js';
 import { runNewPlan } from '../src/commands/new-plan.js';
-import { READ_FILE_TOOL } from '../src/planner/tools.js';
-import type { PlannerProvider } from '../src/planner/types.js';
+import { MockLanguageModelV1, simulateReadableStream } from 'ai/test';
+import { READ_FILE_TOOL_NAME } from '../src/planner/tools/index.js';
 
-const { mockSend } = vi.hoisted(() => ({ mockSend: vi.fn() }));
+const { mockDoStream } = vi.hoisted(() => ({ mockDoStream: vi.fn() }));
 
 vi.mock('../src/planner/providers/index.js', () => ({
-  providerFor: (): PlannerProvider => ({
-    name: 'anthropic',
-    send: mockSend,
+  resolveModel: () => ({
+    provider: 'anthropic' as const,
+    modelId: 'claude-3-5-sonnet-latest',
+    model: new MockLanguageModelV1({
+      provider: 'anthropic.messages',
+      modelId: 'claude-3-5-sonnet-latest',
+      doStream: mockDoStream,
+    }),
   }),
 }));
+
+function streamOk(chunks: LanguageModelV1StreamPart[]) {
+  return {
+    stream: simulateReadableStream({ chunks }),
+    rawCall: { rawPrompt: [] as unknown[], rawSettings: {} },
+  };
+}
+
+function tok(p: number, o: number) {
+  return { promptTokens: p, completionTokens: o, totalTokens: p + o };
+}
 
 let tmp: string;
 let prevCwd: string;
@@ -28,7 +45,7 @@ beforeEach(() => {
   process.chdir(tmp);
   prevKey = process.env.ANTHROPIC_API_KEY;
   process.env.ANTHROPIC_API_KEY = 'test-key';
-  mockSend.mockReset();
+  mockDoStream.mockReset();
 
   const squad = path.join(tmp, SQUAD_DIR);
   fs.mkdirSync(squad, { recursive: true });
@@ -43,6 +60,8 @@ beforeEach(() => {
         maxContextBytes: 50_000,
         maxDurationSeconds: 180,
       },
+      stages: { scout: { enabled: false } },
+      validation: { enabled: false },
     },
   });
 
@@ -62,17 +81,25 @@ afterEach(() => {
 
 describe('runNewPlan API path', () => {
   it('writes plan file with metadata and assistant text', async () => {
-    mockSend
-      .mockResolvedValueOnce({
-        toolCalls: [{ id: 'c1', name: READ_FILE_TOOL.name, input: { path: 'only.txt' } }],
-        stopReason: 'tool_use' as const,
-        usage: { inputTokens: 5, outputTokens: 5 },
-      })
-      .mockResolvedValueOnce({
-        text: '# Story 01 — Done\n\nBody.\n',
-        stopReason: 'end_turn' as const,
-        usage: { inputTokens: 10, outputTokens: 20 },
-      });
+    mockDoStream
+      .mockResolvedValueOnce(
+        streamOk([
+          {
+            type: 'tool-call',
+            toolCallType: 'function',
+            toolCallId: 'c1',
+            toolName: READ_FILE_TOOL_NAME,
+            args: JSON.stringify({ path: 'only.txt' }),
+          },
+          { type: 'finish', finishReason: 'tool-calls', usage: tok(5, 5) },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        streamOk([
+          { type: 'text-delta', textDelta: '# Story 01 — Done\n\nBody.\n' },
+          { type: 'finish', finishReason: 'stop', usage: tok(10, 20) },
+        ]),
+      );
 
     const intake = path.join(tmp, '.squad/stories/feat/sid/intake.md');
     await runNewPlan(intake, { yes: true });
@@ -87,11 +114,12 @@ describe('runNewPlan API path', () => {
   });
 
   it('writes a .partial.md plan and throws SquadExit(2) when the planner stops on max_tokens', async () => {
-    mockSend.mockResolvedValueOnce({
-      text: '# truncated\n',
-      stopReason: 'max_tokens' as const,
-      usage: { inputTokens: 1, outputTokens: 1 },
-    });
+    mockDoStream.mockResolvedValueOnce(
+      streamOk([
+        { type: 'text-delta', textDelta: '# truncated\n' },
+        { type: 'finish', finishReason: 'length', usage: tok(1, 1) },
+      ]),
+    );
     const intake = path.join(tmp, '.squad/stories/feat/sid/intake.md');
     await expect(runNewPlan(intake, { yes: true, api: true })).rejects.toSatisfy(
       (e: unknown) => e instanceof SquadExit && (e as SquadExit).exitCode === 2,

@@ -20,50 +20,41 @@ function kindTitle(kind: PlannerSessionLimitContext['kind']): string {
       return 'Model round limit';
     case 'wall_clock':
       return 'Wall-clock time limit';
-    case 'cost_cap':
-      return 'Estimated cost cap';
     case 'file_or_context_reads':
       return 'File read or context size limit';
   }
 }
 
-function kindDetail(ctx: PlannerSessionLimitContext): string[] {
+function tokenSummary(ctx: PlannerSessionLimitContext): string {
   const snap = ctx.budgetSnapshot;
-  const cost =
-    snap.usage.costUsd !== undefined
-      ? `Estimated spend so far: about $${snap.usage.costUsd.toFixed(2)} (provider-reported when available).`
-      : 'Estimated spend so far: not reported by the provider for this run.';
+  return `Tokens so far: ${snap.usage.inputTokens} in / ${snap.usage.outputTokens} out for this session.`;
+}
 
+function kindDetail(ctx: PlannerSessionLimitContext): string[] {
   switch (ctx.kind) {
     case 'max_output_tokens':
       return [
         `The model hit the per-request output cap (${ctx.maxOutputTokens} completion tokens). Long plans can stop mid-markdown even though the session is otherwise healthy.`,
         'You can continue: squad-kit will ask the model to append the rest of the plan in a follow-up request (extra tokens apply).',
-        cost,
+        tokenSummary(ctx),
       ];
     case 'max_iterations':
       return [
         `The planner reached its round cap (${ctx.maxIterations} model turns) without a clean stop.`,
         'Continuing raises the round cap and file/time budgets for this run by another full slice from your config.',
-        cost,
+        tokenSummary(ctx),
       ];
     case 'wall_clock':
       return [
         'The configured wall-clock budget for this planning session elapsed before the model finished.',
         'Continuing adds another slice of time (and read/output/round limits) from your planner budget.',
-        cost,
-      ];
-    case 'cost_cap':
-      return [
-        'Spending crossed the optional `planner.budget.maxCostUsd` ceiling for this session.',
-        'Continuing raises that ceiling for this run by another slice from config (if a cap is set).',
-        cost,
+        tokenSummary(ctx),
       ];
     case 'file_or_context_reads':
       return [
         'A `read_file` call could not run because the file-read count or total read-bytes budget was exhausted.',
         'Continuing extends read, context, time, round, and output limits for this session so the model can read again or finish without reads.',
-        cost,
+        tokenSummary(ctx),
       ];
   }
 }

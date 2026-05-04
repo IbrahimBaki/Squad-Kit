@@ -29,7 +29,7 @@ describe('init planner (non-interactive)', () => {
   it('enables anthropic with default budget when -y and --planner anthropic', async () => {
     await runInit({ yes: true, planner: 'anthropic' });
     const config = loadConfig(path.join(tmp, '.squad', 'config.yaml'));
-    expect(config.planner).toEqual({
+    expect(config.planner).toMatchObject({
       enabled: true,
       provider: 'anthropic',
       mode: 'auto',
@@ -40,6 +40,9 @@ describe('init planner (non-interactive)', () => {
       },
       cache: { enabled: true },
       maxOutputTokens: 16384,
+      stages: { scout: { enabled: true, maxFiles: 12 } },
+      tools: { grep: true, listDir: true, rangedRead: true },
+      validation: { enabled: true, strict: false },
     });
   });
 

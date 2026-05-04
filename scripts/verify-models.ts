@@ -11,7 +11,11 @@ interface ModelCheck {
 const CHECKS: ModelCheck[] = [
   {
     provider: 'anthropic',
-    ids: [PLANNER_MODEL_MAP.anthropic.plan, PLANNER_MODEL_MAP.anthropic.execute],
+    ids: [
+      PLANNER_MODEL_MAP.anthropic.plan,
+      PLANNER_MODEL_MAP.anthropic.execute,
+      PLANNER_MODEL_MAP.anthropic.scout,
+    ],
     probe: async (key) => {
       const res = await fetch('https://api.anthropic.com/v1/models?limit=200', {
         headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
@@ -23,7 +27,11 @@ const CHECKS: ModelCheck[] = [
   },
   {
     provider: 'openai',
-    ids: [PLANNER_MODEL_MAP.openai.plan, PLANNER_MODEL_MAP.openai.execute],
+    ids: [
+      PLANNER_MODEL_MAP.openai.plan,
+      PLANNER_MODEL_MAP.openai.execute,
+      PLANNER_MODEL_MAP.openai.scout,
+    ],
     probe: async (key) => {
       const res = await fetch('https://api.openai.com/v1/models', {
         headers: { authorization: `Bearer ${key}` },
@@ -35,7 +43,11 @@ const CHECKS: ModelCheck[] = [
   },
   {
     provider: 'google',
-    ids: [PLANNER_MODEL_MAP.google.plan, PLANNER_MODEL_MAP.google.execute],
+    ids: [
+      PLANNER_MODEL_MAP.google.plan,
+      PLANNER_MODEL_MAP.google.execute,
+      PLANNER_MODEL_MAP.google.scout,
+    ],
     probe: async (key) => {
       const res = await fetch(
         `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(key)}`,

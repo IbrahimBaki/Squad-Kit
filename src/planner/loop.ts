@@ -1,20 +1,28 @@
 import path from 'node:path';
+import fs from 'node:fs';
+import type { LanguageModelV1 } from 'ai';
+import { APICallError } from 'ai';
 import type {
   ChatTurn,
-  PlannerProvider,
   PlannerRunStats,
-  ProviderRequest,
+  ProviderName,
   ProviderResponse,
   ToolCall,
   ToolResult,
   Usage,
 } from './types.js';
 import { Budget } from './budget.js';
-import { READ_FILE_TOOL, readFileTool } from './tools.js';
-import type { ReadFileResult } from './tools.js';
-import { rateLimitMessage } from './provider-errors.js';
-import { prefixOf } from './providers/prefix.js';
-import * as ui from '../ui/index.js';
+import { PlannerUserCancelledError, buildPlannerTools, MAX_BYTES_PER_FULL_READ, looksBinary, readFileTool } from './tools/index.js';
+import type { ReadFileResult } from './tools/read-file.js';
+import {
+  detectModelNotFound,
+  detectRateLimit,
+  modelNotFoundMessage,
+  rateLimitMessage,
+} from './provider-errors.js';
+import { usageFromLanguageModelStep } from './usage-map.js';
+import { turnsToCoreMessages } from './core-messages.js';
+import { composeScoutedUserMessage } from './system-prompt.js';
 import { DEFAULT_PLANNER_MAX_OUTPUT_TOKENS } from '../core/config.js';
 import { newRunId } from '../core/runs.js';
 import {
@@ -24,6 +32,8 @@ import {
   type PlannerSessionLimitContext,
 } from './session-limits.js';
 import { PlannerEventBus } from './events.js';
+import { runScout } from './stages/scout.js';
+import { validatePlan, type ValidationIssue } from './validation.js';
 
 /**
  * Upper bound on the auto-retry wait. Chosen to cover the common Anthropic Tier 1 /
@@ -58,9 +68,12 @@ async function sleepWithAbort(
 
 export interface RunPlannerInput {
   root: string;
-  provider: PlannerProvider;
-  model: string;
-  apiKey: string;
+  /** Resolved model handle from `resolveModel`. */
+  model: LanguageModelV1;
+  /** Provider id for telemetry and rate-limit messages. */
+  provider: ProviderName;
+  /** Model id string for plan metadata (must match configured / pinned id). */
+  modelId: string;
   systemPrompt: string;
   userPrompt: string;
   budget: Budget;
@@ -88,6 +101,21 @@ export interface RunPlannerInput {
   runId?: string;
   /** Optional cancel signal; loop checks between turns and inside long sleeps. */
   abort?: AbortSignal;
+  stages?: {
+    scout?: {
+      enabled?: boolean;
+      model?: LanguageModelV1;
+      modelId?: string;
+      maxFiles?: number;
+      maxOutputTokens?: number;
+    };
+  };
+  validation?: { enabled?: boolean; strict?: boolean };
+  toolsEnabled?: { grep?: boolean; listDir?: boolean; rangedRead?: boolean };
+  /** When the scout stage runs, this system prompt is composed by the caller (see `composeScoutSystemPrompt`). */
+  scoutSystemPrompt?: string;
+  /** Markdown assembled after scout; injected as a dedicated cached user turn (not appended to system prompt). */
+  scoutedSection?: string;
 }
 
 /** Why the loop stopped when `finishedNormally` is false (non-error, non-budget, non-timeout). */
@@ -95,7 +123,6 @@ export type PlannerIncompleteKind =
   | 'max_output_tokens'
   | 'max_iterations'
   | 'wall_clock'
-  | 'cost_cap'
   | 'budget_reads';
 
 export interface RunPlannerOutput {
@@ -107,6 +134,21 @@ export interface RunPlannerOutput {
   stats: PlannerRunStats;
   incompleteKind?: PlannerIncompleteKind;
   /** User declined to continue after a session limit was hit (only when `decideOnLimit` is set). */
+  userCancelled?: boolean;
+  scout?: { selected: string[]; reasoning: string; durationMs: number; tokensUsed: number };
+  validation?: { issues: ValidationIssue[]; durationMs: number };
+  stagesStats: { scout?: PlannerRunStats; draft: PlannerRunStats };
+}
+
+/** @internal Result of the draft-stage loop only (before scout/validation orchestration aggregates). */
+export interface DraftStageOutput {
+  planText: string;
+  budgetExhausted: boolean;
+  timedOut: boolean;
+  finishedNormally: boolean;
+  iterations: number;
+  stats: PlannerRunStats;
+  incompleteKind?: PlannerIncompleteKind;
   userCancelled?: boolean;
 }
 
@@ -131,6 +173,127 @@ function buildPlannerRunStats(budget: Budget, turns: number, runStartedAt: numbe
     cacheReadTokens: cacheRead,
     cacheHitRatio,
     durationMs: Date.now() - runStartedAt,
+  };
+}
+
+export function buildScoutedContextSection(
+  root: string,
+  budget: Budget,
+  selectedFiles: string[],
+  bus: PlannerEventBus,
+  runId: string,
+  readRanges?: Array<{ path: string; offset: number; limit: number }>,
+): string {
+  const normalizeRel = (p: string) => p.replace(/^\.\//, '');
+  const rangeByPath = new Map<string, { offset: number; limit: number }>();
+  for (const rr of readRanges ?? []) {
+    rangeByPath.set(normalizeRel(rr.path), rr);
+  }
+
+  const ordered: string[] = [];
+  const seenPath = new Set<string>();
+  for (const f of selectedFiles) {
+    const c = normalizeRel(f);
+    if (!seenPath.has(c)) {
+      seenPath.add(c);
+      ordered.push(c);
+    }
+  }
+  for (const p of rangeByPath.keys()) {
+    if (!seenPath.has(p)) {
+      seenPath.add(p);
+      ordered.push(p);
+    }
+  }
+
+  const blocks: string[] = ['\n## Scouted context (already loaded)\n'];
+
+  for (const cleaned of ordered) {
+    const rr = rangeByPath.get(cleaned);
+    if (rr) {
+      const result = readFileTool(root, budget, { path: cleaned, offset: rr.offset, limit: rr.limit });
+      const hi = rr.offset + rr.limit - 1;
+      if (result.isError) {
+        blocks.push(
+          `\n### \`${cleaned}\` (lines ${rr.offset}–${hi})\n\n_${result.content}_\n`,
+        );
+      } else {
+        blocks.push(
+          `\n### \`${cleaned}\` (lines ${rr.offset}–${hi})\n\n\`\`\`\n${result.content}\n\`\`\`\n`,
+        );
+      }
+      continue;
+    }
+
+    const resolved = path.resolve(root, cleaned);
+    const rc = path.relative(root, resolved);
+    if (rc.startsWith('..') || path.isAbsolute(rc)) {
+      bus.emit({
+        kind: 'validation_issue',
+        runId,
+        severity: 'warning',
+        issueKind: 'missing_path',
+        path: cleaned,
+        detail: 'Scout-selected path escapes the project root',
+      });
+      continue;
+    }
+    if (!fs.existsSync(resolved)) {
+      bus.emit({
+        kind: 'validation_issue',
+        runId,
+        severity: 'warning',
+        issueKind: 'missing_path',
+        path: cleaned,
+        detail: 'Scout selected this path but it does not exist on disk',
+      });
+      continue;
+    }
+    const st = fs.statSync(resolved);
+    if (!st.isFile()) continue;
+    const n = Math.min(st.size, MAX_BYTES_PER_FULL_READ);
+    const cap = budget.canRead(n);
+    if (!cap.ok) {
+      blocks.push(`\n### \`${cleaned}\`\n\n_(skipped: ${cap.reason})_\n`);
+      continue;
+    }
+    let buf: Buffer;
+    try {
+      buf = fs.readFileSync(resolved);
+    } catch {
+      continue;
+    }
+    if (buf.length > MAX_BYTES_PER_FULL_READ) {
+      const head = buf.subarray(0, MAX_BYTES_PER_FULL_READ);
+      if (looksBinary(head)) {
+        blocks.push(`\n### \`${cleaned}\`\n\n_(binary file skipped)_\n`);
+        continue;
+      }
+      budget.recordRead(head.length);
+      blocks.push(
+        `\n### \`${cleaned}\` (truncated: first ${MAX_BYTES_PER_FULL_READ}-byte head; full size ${buf.length} bytes)\n\n\`\`\`\n${head.toString('utf8')}\n\`\`\`\n`,
+      );
+      continue;
+    }
+    if (looksBinary(buf)) {
+      blocks.push(`\n### \`${cleaned}\`\n\n_(binary file skipped)_\n`);
+      continue;
+    }
+    budget.recordRead(buf.length);
+    blocks.push(`\n### \`${cleaned}\`\n\n\`\`\`\n${buf.toString('utf8')}\n\`\`\`\n`);
+  }
+  return blocks.join('');
+}
+
+function scoutStageStats(usage: { inputTokens: number; outputTokens: number }, durationMs: number): PlannerRunStats {
+  return {
+    turns: 0,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheCreationTokens: 0,
+    cacheReadTokens: 0,
+    cacheHitRatio: 0,
+    durationMs,
   };
 }
 
@@ -186,7 +349,7 @@ function cancelledOutput(
   budgetExhausted: boolean,
   iterations: number,
   runStartedAt: number,
-): RunPlannerOutput {
+): DraftStageOutput {
   bus.emit({ kind: 'cancelled', runId });
   return {
     planText: accumulatedText,
@@ -199,29 +362,123 @@ function cancelledOutput(
   };
 }
 
-export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutput> {
+function asToolInput(args: unknown): Record<string, unknown> {
+  if (args && typeof args === 'object' && !Array.isArray(args)) return args as Record<string, unknown>;
+  if (typeof args === 'string') {
+    try {
+      return JSON.parse(args) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function normalizeToolExecutionResult(result: unknown): { content: string; isError: boolean } {
+  if (typeof result === 'string') {
+    try {
+      const j = JSON.parse(result) as unknown;
+      if (j && typeof j === 'object' && !Array.isArray(j) && 'content' in j) {
+        const o = j as { content?: unknown; isError?: unknown };
+        return {
+          content: typeof o.content === 'string' ? o.content : JSON.stringify(o.content ?? ''),
+          isError: o.isError === true,
+        };
+      }
+    } catch {
+      /* plain tool-result string */
+    }
+    return { content: result, isError: false };
+  }
+  if (result && typeof result === 'object' && !Array.isArray(result) && 'content' in result) {
+    const o = result as { content?: unknown; isError?: unknown };
+    return {
+      content: typeof o.content === 'string' ? o.content : JSON.stringify(o.content ?? ''),
+      isError: o.isError === true,
+    };
+  }
+  return { content: typeof result === 'undefined' ? '' : JSON.stringify(result), isError: false };
+}
+
+function applyStepToTurns(
+  turns: ChatTurn[],
+  step: {
+    text: string;
+    toolCalls: Array<{ toolCallId: string; toolName: string; args: unknown }>;
+    toolResults: Array<{ toolCallId: string; result: unknown }>;
+  },
+): void {
+  const callsById = new Map<string, string>();
+  const toolCalls: ToolCall[] = step.toolCalls.map((tc) => {
+    callsById.set(tc.toolCallId, tc.toolName);
+    return { id: tc.toolCallId, name: tc.toolName, input: asToolInput(tc.args) };
+  });
+  turns.push({
+    role: 'assistant',
+    ...(step.text ? { text: step.text } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
+  });
+  if (step.toolResults.length) {
+    const toolResults: ToolResult[] = step.toolResults.map((tr) => {
+      const norm = normalizeToolExecutionResult(tr.result);
+      return {
+        toolCallId: tr.toolCallId,
+        name: callsById.get(tr.toolCallId) ?? 'read_file',
+        content: norm.content,
+        ...(norm.isError ? { isError: true as const } : {}),
+      };
+    });
+    turns.push({ role: 'user', toolResults });
+  }
+}
+
+function providerResponseFromApiError(
+  provider: ProviderName,
+  modelId: string,
+  err: APICallError,
+): ProviderResponse {
+  const body = err.responseBody ?? '';
+  const nf = detectModelNotFound(provider, modelId, err.statusCode ?? 0, body);
+  if (nf) {
+    return {
+      stopReason: 'error',
+      errorKind: 'model_not_found',
+      rawError: modelNotFoundMessage(nf),
+    };
+  }
+  const rl = detectRateLimit(provider, err.statusCode ?? 0, err.responseHeaders ?? {}, body);
+  if (rl) {
+    return {
+      stopReason: 'error',
+      errorKind: 'rate_limit',
+      retryAfterSec: rl.retryAfterSec,
+      rawError: `${provider} ${err.statusCode ?? 'error'}: ${body.slice(0, 500)}`,
+    };
+  }
+  return {
+    stopReason: 'error',
+    rawError: `${provider} ${err.statusCode ?? 'error'}: ${body.slice(0, 500)}`,
+  };
+}
+
+async function runDraftStage(input: RunPlannerInput): Promise<DraftStageOutput> {
   const runStartedAt = Date.now();
   const bus = input.events ?? new PlannerEventBus();
   const runId = input.runId ?? newRunId();
   const cacheEnabled = input.cacheEnabled ?? true;
-  bus.emit({
-    kind: 'started',
-    runId,
-    provider: input.provider.name,
-    model: input.model,
-    cacheEnabled,
-  });
 
   const baseMaxIter = input.maxIterations ?? DEFAULT_PLANNER_MAX_ITERATIONS;
   const maxIter = { current: baseMaxIter };
   const baseMaxOut = input.maxOutputTokens ?? DEFAULT_PLANNER_MAX_OUTPUT_TOKENS;
   const maxOut = { current: baseMaxOut };
   const turns: ChatTurn[] = [{ role: 'user', text: input.userPrompt }];
+  if (input.scoutedSection?.trim()) {
+    turns.push({ role: 'user', text: composeScoutedUserMessage({ scoutedSection: input.scoutedSection }) });
+  }
   let accumulatedText = '';
   let iterations = 0;
   let budgetExhausted = false;
   let finishedNormally = false;
-  let prevRequestPrefix: string | undefined;
   const decide = input.decideOnLimit;
   const sleepFn = input.sleep ?? defaultSleep;
 
@@ -297,69 +554,168 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
         stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
       };
     }
-    if (input.budget.overCost()) {
-      if (decide) {
-        const d = await decide(limitCtx('cost_cap'));
-        if (d === 'cancel') {
-          return {
-            planText: accumulatedText,
-            budgetExhausted,
-            timedOut: false,
-            finishedNormally: false,
-            iterations,
-            stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
-            incompleteKind: 'cost_cap',
-            userCancelled: true,
-          };
-        }
-        extendAllSessionLimits(input, maxIter, maxOut, baseMaxIter, baseMaxOut);
-        iterations -= 1;
-        continue;
-      }
-      return {
-        planText: accumulatedText,
-        budgetExhausted: true,
-        timedOut: false,
-        finishedNormally: false,
-        iterations,
-        stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
-      };
-    }
 
     if (iterations >= 2) {
       bus.emit({ kind: 'turn_started', runId, turn: iterations });
     }
 
-    const request: ProviderRequest = {
-      systemPrompt: input.systemPrompt,
-      model: input.model,
-      tools: [READ_FILE_TOOL],
-      turns,
-      apiKey: input.apiKey,
-      maxOutputTokens: maxOut.current,
+    const tools = buildPlannerTools({
+      root: input.root,
+      budget: input.budget,
+      enabled: {
+        grep: input.toolsEnabled?.grep ?? true,
+        listDir: input.toolsEnabled?.listDir ?? true,
+        rangedRead: input.toolsEnabled?.rangedRead ?? true,
+      },
+      readHooks: {
+        runId,
+        turn: iterations,
+        bus,
+        onToolCall: input.onToolCall,
+        decideOnLimit: input.decideOnLimit,
+        getLimitCtx: () => limitCtx('file_or_context_reads'),
+        extendSessionLimits: () => extendAllSessionLimits(input, maxIter, maxOut, baseMaxIter, baseMaxOut),
+        getAccumulatedText: () => accumulatedText,
+        setBudgetExhausted: (v) => {
+          budgetExhausted = v;
+        },
+      },
+    });
+
+    const messages = turnsToCoreMessages(input.systemPrompt, turns, {
       cacheEnabled,
-      abort: input.abort,
-    };
+      provider: input.provider,
+    });
 
     bus.emit({ kind: 'request_sent', runId, turn: iterations });
 
-    if (
-      process.env.NODE_ENV !== 'production' &&
-      process.env.NODE_ENV !== 'test' &&
-      prevRequestPrefix !== undefined
-    ) {
-      const currentPrefix = prefixOf(input.provider.name, request);
-      if (!currentPrefix.startsWith(prevRequestPrefix)) {
-        const byte = firstByteDiff(prevRequestPrefix, currentPrefix);
-        ui.warning(
-          `planner: prefix mutation at turn ${iterations}, byte ${byte} — caching will not hit.`,
-        );
-      }
-    }
+    let attempt = 0;
+    let stepResult!: {
+      text: string;
+      finishReason: string;
+      toolCalls: Array<{ toolCallId: string; toolName: string; args: unknown }>;
+      toolResults: Array<{ toolCallId: string; result: unknown }>;
+      usage: import('ai').LanguageModelUsage;
+      providerMetadata: unknown;
+    };
+    let retrySkippedReason: 'retry_after_too_long' | undefined;
+    let retriedRateLimit = false;
 
-    let response: ProviderResponse;
+    const callStream = async (): Promise<void> => {
+      const { streamText } = await import('ai');
+      const stream = streamText({
+        model: input.model,
+        messages,
+        tools,
+        toolChoice: 'auto',
+        maxSteps: 1,
+        maxRetries: 0,
+        maxTokens: maxOut.current,
+        abortSignal: input.abort,
+        onChunk: ({ chunk }) => {
+          if (chunk.type === 'text-delta') {
+            accumulatedText += chunk.textDelta;
+            input.onAssistantText?.(chunk.textDelta);
+            bus.emit({ kind: 'assistant_text', runId, turn: iterations, delta: chunk.textDelta });
+          }
+        },
+        onStepFinish: (step) => {
+          const u = usageFromLanguageModelStep(step.usage, step.providerMetadata);
+          recordUsageAndEmit(bus, input, runId, iterations, u);
+        },
+      });
+      // `consumeStream()` swallows errors and never rejects; if `doStream` throws before any
+      // `step-finish`, `stream.steps` never settles. Drain `fullStream` and rethrow error parts.
+      for await (const part of stream.fullStream) {
+        const p = part as { type?: string; error?: unknown };
+        if (p.type === 'error') {
+          throw p.error;
+        }
+      }
+      const steps = await stream.steps;
+      const last = steps[steps.length - 1];
+      if (!last) throw new Error('planner: empty model step');
+      stepResult = {
+        text: last.text,
+        finishReason: last.finishReason,
+        toolCalls: last.toolCalls.flatMap((tc) =>
+          tc
+            ? [
+                {
+                  toolCallId: tc.toolCallId,
+                  toolName: tc.toolName,
+                  args: tc.args,
+                },
+              ]
+            : [],
+        ),
+        toolResults: last.toolResults.flatMap((tr) =>
+          tr ? [{ toolCallId: tr.toolCallId, result: tr.result }] : [],
+        ),
+        usage: last.usage,
+        providerMetadata: last.providerMetadata,
+      };
+    };
+
     try {
-      response = await input.provider.send(request);
+      while (true) {
+        try {
+          await callStream();
+          break;
+        } catch (e) {
+          if (PlannerUserCancelledError.is(e)) {
+            return {
+              planText: e.planText,
+              budgetExhausted: false,
+              timedOut: false,
+              finishedNormally: false,
+              iterations,
+              stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
+              incompleteKind: 'budget_reads',
+              userCancelled: true,
+            };
+          }
+          if (isAbortError(e)) {
+            return cancelledOutput(input, bus, runId, accumulatedText, budgetExhausted, iterations, runStartedAt);
+          }
+          if (APICallError.isInstance(e)) {
+            const synthetic = providerResponseFromApiError(input.provider, input.modelId, e);
+            if (synthetic.errorKind === 'rate_limit') {
+              const asked = synthetic.retryAfterSec;
+              const emitRateLimit = (phase: 'retrying' | 'aborted', waitSec: number) => {
+                bus.emit({
+                  kind: 'rate_limit',
+                  runId,
+                  turn: iterations,
+                  retryAfterSec: synthetic.retryAfterSec,
+                  waitSec,
+                  capSec: MAX_RATE_LIMIT_RETRY_SEC,
+                  phase,
+                  provider: input.provider,
+                  rawBody: (synthetic.rawError ?? '').slice(0, 200),
+                });
+              };
+              if (asked !== undefined && asked > MAX_RATE_LIMIT_RETRY_SEC) {
+                emitRateLimit('aborted', asked);
+                retrySkippedReason = 'retry_after_too_long';
+                throw composePlannerError(input.provider, synthetic, false, retrySkippedReason);
+              }
+              if (attempt === 0) {
+                const waitSec = Math.min(asked ?? 10, MAX_RATE_LIMIT_RETRY_SEC);
+                emitRateLimit('retrying', waitSec);
+                input.onRateLimit?.(waitSec);
+                await sleepWithAbort(waitSec * 1000, sleepFn, input.abort);
+                attempt += 1;
+                retriedRateLimit = true;
+                continue;
+              }
+              throw composePlannerError(input.provider, synthetic, true, retrySkippedReason);
+            }
+            throw composePlannerError(input.provider, synthetic, retriedRateLimit, retrySkippedReason);
+          }
+          throw e;
+        }
+      }
     } catch (e) {
       if (isAbortError(e)) {
         return cancelledOutput(input, bus, runId, accumulatedText, budgetExhausted, iterations, runStartedAt);
@@ -367,71 +723,11 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
       throw e;
     }
 
-    if (response.usage) {
-      recordUsageAndEmit(bus, input, runId, iterations, response.usage);
-    }
+    const finishReason = stepResult.finishReason;
+    const toolCallsLen = stepResult.toolCalls.length;
 
-    let retriedRateLimit = false;
-    let retrySkippedReason: 'retry_after_too_long' | undefined;
-    if (response.stopReason === 'error' && response.errorKind === 'rate_limit') {
-      const asked = response.retryAfterSec;
-      const emitRateLimit = (phase: 'retrying' | 'aborted', waitSec: number) => {
-        bus.emit({
-          kind: 'rate_limit',
-          runId,
-          turn: iterations,
-          retryAfterSec: response.retryAfterSec,
-          waitSec,
-          capSec: MAX_RATE_LIMIT_RETRY_SEC,
-          phase,
-          provider: input.provider.name,
-          rawBody: (response.rawError ?? '').slice(0, 200),
-        });
-      };
-      if (asked !== undefined && asked > MAX_RATE_LIMIT_RETRY_SEC) {
-        emitRateLimit('aborted', asked);
-        retrySkippedReason = 'retry_after_too_long';
-      } else {
-        const waitSec = Math.min(asked ?? 10, MAX_RATE_LIMIT_RETRY_SEC);
-        emitRateLimit('retrying', waitSec);
-        input.onRateLimit?.(waitSec);
-        try {
-          await sleepWithAbort(waitSec * 1000, sleepFn, input.abort);
-        } catch (e) {
-          if (isAbortError(e)) {
-            return cancelledOutput(input, bus, runId, accumulatedText, budgetExhausted, iterations, runStartedAt);
-          }
-          throw e;
-        }
-        try {
-          response = await input.provider.send(request);
-        } catch (e) {
-          if (isAbortError(e)) {
-            return cancelledOutput(input, bus, runId, accumulatedText, budgetExhausted, iterations, runStartedAt);
-          }
-          throw e;
-        }
-        if (response.usage) {
-          recordUsageAndEmit(bus, input, runId, iterations, response.usage);
-        }
-        retriedRateLimit = true;
-      }
-    }
-
-    if (response.stopReason === 'error') {
-      throw composePlannerError(input.provider.name, response, retriedRateLimit, retrySkippedReason);
-    }
-
-    prevRequestPrefix = prefixOf(input.provider.name, request);
-
-    if (response.text) {
-      accumulatedText += response.text;
-      input.onAssistantText?.(response.text);
-      bus.emit({ kind: 'assistant_text', runId, turn: iterations, delta: response.text });
-    }
-
-    if (response.stopReason === 'max_tokens' && !response.toolCalls?.length) {
-      bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: response.stopReason });
+    if (finishReason === 'length' && toolCallsLen === 0) {
+      bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: 'max_tokens' });
       if (decide) {
         const d = await decide(limitCtx('max_output_tokens'));
         if (d === 'cancel') {
@@ -447,7 +743,7 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
           };
         }
         extendAllSessionLimits(input, maxIter, maxOut, baseMaxIter, baseMaxOut);
-        turns.push({ role: 'assistant', text: response.text ?? '' });
+        applyStepToTurns(turns, stepResult);
         turns.push({ role: 'user', text: PLANNER_MARKDOWN_CONTINUATION_USER });
         iterations -= 1;
         continue;
@@ -463,8 +759,15 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
       };
     }
 
-    if (response.stopReason === 'end_turn' || !response.toolCalls?.length) {
-      bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: response.stopReason });
+    if (finishReason === 'error' || finishReason === 'content-filter') {
+      throw new Error(
+        stepResult.text ||
+          `planner: model reported ${finishReason}. Run \`squad doctor\` to diagnose, or retry \u2014 most 5xx errors are transient.`,
+      );
+    }
+
+    if ((finishReason === 'stop' || finishReason === 'unknown') && toolCallsLen === 0) {
+      bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: finishReason });
       finishedNormally = true;
       return {
         planText: accumulatedText,
@@ -476,71 +779,20 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
       };
     }
 
-    turns.push({
-      role: 'assistant',
-      text: response.text,
-      toolCalls: response.toolCalls,
-    });
-
-    const toolResults: ToolResult[] = [];
-    const toolCalls = response.toolCalls;
-    for (let i = 0; i < toolCalls.length; i += 1) {
-      const tc = toolCalls[i]!;
-      if (tc.name !== READ_FILE_TOOL.name) {
-        toolResults.push({ toolCallId: tc.id, content: `unknown tool "${tc.name}"`, isError: true });
-        continue;
-      }
-      const before = input.budget.snapshot().bytes;
-      let result = readFileTool(input.root, input.budget, tc.input);
-      const after = input.budget.snapshot().bytes;
-      const bytesLoaded = after - before;
-      input.onToolCall?.(tc, bytesLoaded, after);
-      bus.emit({
-        kind: 'tool_call',
-        runId,
-        turn: iterations,
-        toolCall: tc,
-        bytesLoaded,
-        totalBytes: after,
-      });
-      if (readBudgetishError(result)) {
-        if (decide) {
-          const d = await decide(limitCtx('file_or_context_reads'));
-          if (d === 'cancel') {
-            toolResults.push({ toolCallId: tc.id, content: result.content, isError: true });
-            for (let j = i + 1; j < toolCalls.length; j += 1) {
-              const t2 = toolCalls[j]!;
-              toolResults.push({
-                toolCallId: t2.id,
-                content:
-                  t2.name === READ_FILE_TOOL.name
-                    ? 'read_file: not executed (planning session stopped after file/context budget).'
-                    : `unknown tool "${t2.name}"`,
-                isError: true,
-              });
-            }
-            turns.push({ role: 'user', toolResults });
-            return {
-              planText: accumulatedText,
-              budgetExhausted: false,
-              timedOut: false,
-              finishedNormally: false,
-              iterations,
-              stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
-              incompleteKind: 'budget_reads',
-              userCancelled: true,
-            };
-          }
-          extendAllSessionLimits(input, maxIter, maxOut, baseMaxIter, baseMaxOut);
-          result = readFileTool(input.root, input.budget, tc.input);
-        } else {
-          budgetExhausted = true;
-        }
-      }
-      toolResults.push({ toolCallId: tc.id, content: result.content, isError: result.isError });
+    if (toolCallsLen === 0) {
+      bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: finishReason });
+      finishedNormally = true;
+      return {
+        planText: accumulatedText,
+        budgetExhausted,
+        timedOut: false,
+        finishedNormally,
+        iterations,
+        stats: buildPlannerRunStats(input.budget, iterations, runStartedAt),
+      };
     }
 
-    turns.push({ role: 'user', toolResults });
+    applyStepToTurns(turns, stepResult);
 
     if (budgetExhausted) {
       turns.push({
@@ -551,24 +803,174 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
       });
     }
 
-    bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: response.stopReason });
+    bus.emit({ kind: 'turn_complete', runId, turn: iterations, stopReason: finishReason });
   }
+}
+
+export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutput> {
+  const bus = input.events ?? new PlannerEventBus();
+  const runId = input.runId ?? newRunId();
+  const cacheEnabled = input.cacheEnabled ?? true;
+  bus.emit({
+    kind: 'started',
+    runId,
+    provider: input.provider,
+    model: input.modelId,
+    cacheEnabled,
+  });
+
+  const merged: RunPlannerInput = { ...input, events: bus, runId };
+  const systemPrompt = input.systemPrompt;
+  let scoutSummary: RunPlannerOutput['scout'];
+  let scoutStats: PlannerRunStats | undefined;
+  let scoutedSection: string | undefined;
+
+  const scoutOn = input.stages?.scout?.enabled !== false;
+  const scoutModel = input.stages?.scout?.model;
+  const maxScoutFiles = input.stages?.scout?.maxFiles ?? 12;
+  const scoutMaxOut = input.stages?.scout?.maxOutputTokens ?? 2048;
+  const scoutModelIdStr = input.stages?.scout?.modelId ?? '';
+
+  if (scoutOn && scoutModel) {
+    if (!input.scoutSystemPrompt?.trim()) {
+      throw new Error(
+        'planner: scout enabled but `scoutSystemPrompt` was not provided. ' +
+          'Compose it via composeScoutSystemPrompt() or set stages.scout.enabled = false.',
+      );
+    }
+    const t0 = Date.now();
+    bus.emit({ kind: 'stage_started', runId, stage: 'scout' });
+    try {
+      const scoutRes = await runScout({
+        model: scoutModel,
+        systemPrompt: input.scoutSystemPrompt,
+        userPrompt: input.userPrompt,
+        budget: input.budget,
+        abort: input.abort,
+        maxTokens: scoutMaxOut,
+      });
+      const durationMs = Date.now() - t0;
+      if (scoutRes) {
+        const files = scoutRes.output.selectedFiles.slice(0, maxScoutFiles);
+        const tokensUsed = scoutRes.usage.inputTokens + scoutRes.usage.outputTokens;
+        scoutSummary = {
+          selected: files,
+          reasoning: scoutRes.output.reasoning,
+          durationMs,
+          tokensUsed,
+        };
+        scoutStats = scoutStageStats(scoutRes.usage, durationMs);
+        bus.emit({
+          kind: 'scout_result',
+          runId,
+          selected: files,
+          reasoning: scoutRes.output.reasoning,
+        });
+        scoutedSection = buildScoutedContextSection(
+          input.root,
+          input.budget,
+          files,
+          bus,
+          runId,
+          scoutRes.output.readRanges,
+        );
+        bus.emit({
+          kind: 'stage_complete',
+          runId,
+          stage: 'scout',
+          success: true,
+          durationMs,
+          tokensUsed,
+        });
+      } else {
+        bus.emit({
+          kind: 'stage_complete',
+          runId,
+          stage: 'scout',
+          success: false,
+          durationMs,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (APICallError.isInstance(err)) {
+        const status = err.statusCode ?? 0;
+        if (status === 401 || status === 403) {
+          throw err;
+        }
+        if (
+          detectModelNotFound(input.provider, scoutModelIdStr, status, err.responseBody ?? '')
+        ) {
+          throw err;
+        }
+      }
+      bus.emit({
+        kind: 'stage_complete',
+        runId,
+        stage: 'scout',
+        success: false,
+        durationMs: Date.now() - t0,
+        errorMessage: msg.slice(0, 200),
+      });
+    }
+  }
+
+  const draftStarted = Date.now();
+  bus.emit({ kind: 'stage_started', runId, stage: 'draft' });
+  const draft = await runDraftStage({ ...merged, systemPrompt, scoutedSection });
+  bus.emit({
+    kind: 'stage_complete',
+    runId,
+    stage: 'draft',
+    success: draft.finishedNormally && !draft.timedOut && !draft.userCancelled,
+    durationMs: Date.now() - draftStarted,
+  });
+
+  const validationOn = input.validation?.enabled !== false;
+  let issues: ValidationIssue[] = [];
+  let validationDurationMs = 0;
+  if (validationOn && draft.planText.trim()) {
+    const v0 = Date.now();
+    bus.emit({ kind: 'stage_started', runId, stage: 'validation' });
+    issues = validatePlan({ root: input.root, planText: draft.planText });
+    for (const iss of issues.slice(0, 100)) {
+      bus.emit({
+        kind: 'validation_issue',
+        runId,
+        severity: iss.severity,
+        issueKind: iss.kind,
+        path: iss.path,
+        detail: iss.detail,
+        excerpt: iss.excerpt,
+      });
+    }
+    validationDurationMs = Date.now() - v0;
+    bus.emit({
+      kind: 'stage_complete',
+      runId,
+      stage: 'validation',
+      success: true,
+      durationMs: validationDurationMs,
+    });
+  }
+
+  return {
+    ...draft,
+    stats: draft.stats,
+    stagesStats: { scout: scoutStats, draft: draft.stats },
+    scout: scoutSummary,
+    validation: validationOn
+      ? { issues, durationMs: validationDurationMs }
+      : { issues: [], durationMs: 0 },
+  };
 }
 
 export function relativisePath(root: string, p: string): string {
   return path.relative(root, p) || p;
 }
 
-function firstByteDiff(a: string, b: string): number {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i += 1) {
-    if (a.charCodeAt(i) !== b.charCodeAt(i)) return i;
-  }
-  return n;
-}
-
 function composePlannerError(
-  providerName: PlannerProvider['name'],
+  providerName: ProviderName,
   response: ProviderResponse,
   retriedRateLimit: boolean,
   retrySkippedReason?: 'retry_after_too_long',

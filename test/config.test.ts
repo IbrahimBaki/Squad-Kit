@@ -58,12 +58,11 @@ describe('config load/save', () => {
         '    maxFileReads: 10',
         '    maxContextBytes: 20000',
         '    maxDurationSeconds: 60',
-        '    maxCostUsd: 0.5',
       ].join('\n'),
       'utf8',
     );
     const loaded = loadConfig(file);
-    expect(loaded.planner).toEqual({
+    expect(loaded.planner).toMatchObject({
       enabled: true,
       provider: 'openai',
       mode: 'copy',
@@ -71,10 +70,12 @@ describe('config load/save', () => {
         maxFileReads: 10,
         maxContextBytes: 20000,
         maxDurationSeconds: 60,
-        maxCostUsd: 0.5,
       },
       cache: { enabled: true },
       maxOutputTokens: 16384,
+      stages: { scout: { enabled: true, maxFiles: 12, maxOutputTokens: 2048 } },
+      tools: { grep: true, listDir: true, rangedRead: true },
+      validation: { enabled: true, strict: false },
     });
   });
 

@@ -97,7 +97,7 @@ describe('console runs API', () => {
         kind: 'started',
         runId: opts.runId!,
         provider: 'anthropic',
-        model: opts.model,
+        model: opts.modelId,
         cacheEnabled: true,
       });
       await new Promise((r) => setTimeout(r, 200));
@@ -229,7 +229,7 @@ describe('console runs API', () => {
         kind: 'started',
         runId: opts.runId!,
         provider: 'anthropic',
-        model: opts.model,
+        model: opts.modelId,
         cacheEnabled: true,
       });
       await new Promise<void>((resolve) => {

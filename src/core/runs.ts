@@ -19,6 +19,15 @@ export interface RunRecord {
   cacheEnabled: boolean;
   durationMs: number;
   version: 1;
+  scout?: { enabled: boolean; selectedCount?: number; tokensUsed?: number; durationMs?: number };
+  validation?: {
+    enabled: boolean;
+    issuesCount: number;
+    issuesByKind?: Partial<
+      Record<'missing_path' | 'line_range_too_large' | 'symbol_not_found' | 'malformed_metadata', number>
+    >;
+    durationMs?: number;
+  };
 }
 
 const RING_SIZE = 20;

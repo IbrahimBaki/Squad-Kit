@@ -52,7 +52,9 @@ export function templatesDir(): string {
  *
  * @throws if the file is missing (indicates a broken package install).
  */
-export function readBundledPrompt(name: 'generate-plan.md' | 'intake.md' | 'story-skeleton.md'): string {
+export function readBundledPrompt(
+  name: 'generate-plan.md' | 'intake.md' | 'story-skeleton.md' | 'scout.md',
+): string {
   const file = path.join(templatesDir(), 'prompts', name);
   if (!fs.existsSync(file)) {
     throw new Error(

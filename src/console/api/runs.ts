@@ -5,14 +5,16 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { SquadPaths } from '../../core/paths.js';
 import { loadConfig } from '../../core/config.js';
-import { providerFor } from '../../planner/providers/index.js';
+import { resolveModel } from '../../planner/providers/index.js';
 import { Budget } from '../../planner/budget.js';
 import { runPlanner } from '../../planner/loop.js';
 import { PlannerEventBus, type PlannerEvent } from '../../planner/events.js';
 import { listStories } from '../../core/stories.js';
 import { modelFor, readProviderKeyForPaths, providerEnvVar } from '../../core/planner-models.js';
 import { buildRepoMap } from '../../core/repo-map.js';
-import { composeSystemPrompt, composeUserPrompt } from '../../planner/system-prompt.js';
+import { buildPlansIndex } from '../../core/plans-index.js';
+import { summariseIssuesByKind } from '../../planner/validation.js';
+import { composeSystemPrompt, composeUserPrompt, composeScoutSystemPrompt } from '../../planner/system-prompt.js';
 import { writePlanFile, buildMetadataHeader } from '../../planner/writer.js';
 import { writeLastRun } from '../../core/last-run.js';
 import { appendRun, listRuns, newRunId } from '../../core/runs.js';
@@ -98,11 +100,39 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
     const done = (async () => {
       const cfgFresh = loadConfig(opts.paths.configFile);
       const planner = cfgFresh.planner!;
-      const provider = providerFor(planner.provider);
-      const model = modelFor(planner.provider, 'plan', planner.modelOverride);
+      const modelId = modelFor(planner.provider, 'plan', planner.modelOverride);
+      const { model } = resolveModel(planner.provider, modelId, apiKey);
       const budget = new Budget(planner.budget);
       const cacheEnabled = planner.cache?.enabled ?? true;
-      const repoMap = buildRepoMap(opts.paths.root);
+      const scoutEnabled = planner.stages?.scout?.enabled !== false;
+      const validationEnabled = planner.validation?.enabled !== false;
+      const strictValidation = planner.validation?.strict === true;
+      const maxScoutFiles = planner.stages?.scout?.maxFiles ?? 12;
+
+      let scoutModelId = '';
+      let scoutModelHandle: ReturnType<typeof resolveModel>['model'] | undefined;
+      let scoutSystemPrompt: string | undefined;
+      if (scoutEnabled) {
+        scoutModelId = modelFor(
+          planner.provider,
+          'scout',
+          planner.modelOverride,
+          planner.stages?.scout?.modelOverride,
+        );
+        scoutModelHandle = resolveModel(planner.provider, scoutModelId, apiKey).model;
+      }
+
+      const repoMap = buildRepoMap(opts.paths.root, { format: 'tree' });
+      if (scoutEnabled) {
+        scoutSystemPrompt = composeScoutSystemPrompt({
+          projectRoots: cfgFresh.project.projectRoots ?? ['.'],
+          primaryLanguage: cfgFresh.project.primaryLanguage ?? '',
+          trackerType: cfgFresh.tracker.type,
+          repoMap,
+          plansIndex: buildPlansIndex(opts.paths),
+        });
+      }
+
       const systemPrompt = composeSystemPrompt({
         projectRoots: cfgFresh.project.projectRoots ?? ['.'],
         primaryLanguage: cfgFresh.project.primaryLanguage ?? '',
@@ -117,9 +147,9 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
       try {
         result = await runPlanner({
           root: opts.paths.root,
-          provider,
           model,
-          apiKey,
+          provider: planner.provider,
+          modelId,
           systemPrompt,
           userPrompt,
           budget,
@@ -128,6 +158,18 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
           events: bus,
           runId,
           abort: controller.signal,
+          stages: {
+            scout: {
+              enabled: scoutEnabled,
+              model: scoutModelHandle,
+              modelId: scoutModelId,
+              maxFiles: maxScoutFiles,
+              maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
+            },
+          },
+          validation: { enabled: validationEnabled, strict: strictValidation },
+          toolsEnabled: planner.tools,
+          scoutSystemPrompt,
         });
       } catch (err) {
         const durationMs = Date.now() - startedAt;
@@ -148,20 +190,26 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
         return;
       }
 
-      const runSuccess = result.finishedNormally && !result.timedOut && !result.userCancelled;
+      const issueCount = result.validation?.issues.length ?? 0;
+      const issuesByKind = summariseIssuesByKind(result.validation?.issues ?? []);
+      const validationBlocks = strictValidation && validationEnabled && issueCount > 0;
+      const runSuccess =
+        result.finishedNormally && !result.timedOut && !result.userCancelled && !validationBlocks;
       let planFile: string | null = null;
       if (result.planText.trim()) {
         const snap = budget.snapshot();
         const header = buildMetadataHeader({
           provider: planner.provider,
-          model,
+          model: modelId,
           reads: snap.reads,
           bytes: snap.bytes,
           inputTokens: snap.usage.inputTokens,
           outputTokens: snap.usage.outputTokens,
           durationMs: Date.now() - startedAt,
-          costUsd: snap.usage.costUsd,
           planStatus: runSuccess ? undefined : 'partial',
+          scoutEnabled,
+          validationEnabled,
+          validationIssueCount: issueCount,
         });
         const out = writePlanFile({
           paths: opts.paths,
@@ -179,12 +227,12 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
           stats: result.stats,
           completedAt: new Date().toISOString(),
           provider: planner.provider,
-          model,
+          model: modelId,
         });
         await appendRun(opts.paths, {
           runId,
           provider: planner.provider,
-          model,
+          model: modelId,
           feature: story.feature,
           storyId: story.id,
           startedAt: new Date(startedAt).toISOString(),
@@ -195,6 +243,18 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
           stats: result.stats,
           cacheEnabled,
           durationMs: Date.now() - startedAt,
+          scout: {
+            enabled: scoutEnabled,
+            selectedCount: result.scout?.selected.length,
+            tokensUsed: result.scout?.tokensUsed,
+            durationMs: result.scout?.durationMs,
+          },
+          validation: {
+            enabled: validationEnabled,
+            issuesCount: issueCount,
+            issuesByKind,
+            durationMs: result.validation?.durationMs,
+          },
         });
       } catch {
         /* best-effort */

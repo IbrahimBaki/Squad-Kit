@@ -57,25 +57,15 @@ describe('Budget', () => {
     expect(b.timedOut()).toBe(true);
   });
 
-  it('overCost is false when maxCostUsd undefined', () => {
+  it('canExecuteTool gates on read count without tool-name split', () => {
     const b = new Budget({
-      maxFileReads: 10,
-      maxContextBytes: 1000,
+      maxFileReads: 1,
+      maxContextBytes: 100_000,
       maxDurationSeconds: 60,
     });
-    b.recordUsage({ inputTokens: 1, outputTokens: 1, costUsd: 999 });
-    expect(b.overCost()).toBe(false);
-  });
-
-  it('overCost is true when usage exceeds maxCostUsd', () => {
-    const b = new Budget({
-      maxFileReads: 10,
-      maxContextBytes: 1000,
-      maxDurationSeconds: 60,
-      maxCostUsd: 0.01,
-    });
-    b.recordUsage({ inputTokens: 1, outputTokens: 1, costUsd: 0.02 });
-    expect(b.overCost()).toBe(true);
+    expect(b.canExecuteTool().ok).toBe(true);
+    b.recordRead(100);
+    expect(b.canExecuteTool().ok).toBe(false);
   });
 
   it('extendSession adds another slice of read and byte limits', () => {

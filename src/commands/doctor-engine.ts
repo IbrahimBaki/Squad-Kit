@@ -225,14 +225,6 @@ async function checkPlannerConfig(_paths: SquadPaths, ctx: DoctorContext): Promi
       detail: 'planner budget limits must be > 0',
     };
   }
-  if (p.budget.maxCostUsd !== undefined && p.budget.maxCostUsd <= 0) {
-    return {
-      id: 'planner-config',
-      name: 'planner configuration',
-      status: 'fail',
-      detail: 'planner.budget.maxCostUsd must be > 0 when set',
-    };
-  }
   return { id: 'planner-config', name: 'planner configuration', status: 'ok' };
 }
 

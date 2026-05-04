@@ -258,6 +258,10 @@ function useEventSourceBridge(runId: string | null, dispatch: React.Dispatch<Act
       }
     };
 
+    on('stage_started', handlePayload);
+    on('stage_complete', handlePayload);
+    on('scout_result', handlePayload);
+    on('validation_issue', handlePayload);
     on('started', handlePayload);
     on('turn_started', handlePayload);
     on('request_sent', handlePayload);

@@ -42,7 +42,37 @@ export type PlannerEvent =
       durationMs: number;
     }
   | { kind: 'error'; runId: string; message: string }
-  | { kind: 'cancelled'; runId: string };
+  | { kind: 'cancelled'; runId: string }
+  | {
+      kind: 'stage_started';
+      runId: string;
+      stage: 'scout' | 'draft' | 'validation';
+    }
+  | {
+      kind: 'stage_complete';
+      runId: string;
+      stage: 'scout' | 'draft' | 'validation';
+      success: boolean;
+      durationMs: number;
+      tokensUsed?: number;
+      /** Present when success is false (truncated). */
+      errorMessage?: string;
+    }
+  | {
+      kind: 'scout_result';
+      runId: string;
+      selected: string[];
+      reasoning: string;
+    }
+  | {
+      kind: 'validation_issue';
+      runId: string;
+      severity: 'warning' | 'error';
+      issueKind: 'missing_path' | 'line_range_too_large' | 'symbol_not_found' | 'malformed_metadata';
+      path?: string;
+      detail: string;
+      excerpt?: string;
+    };
 
 export type PlannerEventListener = (e: PlannerEvent) => void;
 
