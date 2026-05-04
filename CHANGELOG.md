@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-05-04
+
+### What's new
+
+- API `new-plan` can append planner events to `.squad/runs/<id>.events.jsonl`
+  (thinking text redacted on disk; retention rotates old files).
+- Agent SDK runs emit richer events (tool lifecycle, thinking deltas, caps,
+  runtime metadata) for the CLI and console.
+- API-mode `new-plan` prints stage pipeline, budget meters, and thinking
+  activity; the plan summary cites the events file path.
+- `squad console` HTTP API lists persisted runs and serves stored event streams.
+- Console UI adds a runs index, run report page, and a reworked Generate view
+  with live panels and navigation.
+
+### Bug fixes
+
+- `squad doctor` skips live external probes when `CI` is set and surfaces
+  planner probe errors cleanly.
+- Vitest timeouts increased for slow config loads and console API tests.
+
 ## [0.10.0] — 2026-05-04
 
 ### What's new
