@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -100,6 +101,17 @@ describe('console runs API', () => {
         model: opts.modelId,
         cacheEnabled: true,
       });
+      opts.events?.emit({
+        kind: 'runtime_info',
+        runId: opts.runId!,
+        provider: 'anthropic',
+        model: opts.modelId,
+        runtimeKind: 'vercel',
+        cacheEnabled: true,
+        scoutEnabled: true,
+        validationEnabled: true,
+        budgetCaps: { maxFileReads: 25, maxContextBytes: 50_000, maxDurationSeconds: 180 },
+      });
       await new Promise((r) => setTimeout(r, 200));
       return {
         planText: '# Plan\n',
@@ -133,6 +145,7 @@ describe('console runs API', () => {
     expect(stream.ok).toBe(true);
     const text = await stream.text();
     expect(text).toContain('event: started');
+    expect(text).toContain('event: runtime_info');
     expect(text).toContain('event: done');
     expect(text).toContain('event: closed');
   });
@@ -221,6 +234,92 @@ describe('console runs API', () => {
     expect(text).toContain('event: done');
     expect(text).toContain('"success":true');
     expect(text).not.toContain('event: error');
+  });
+
+  it('SSE replays a finished run from JSONL once the active slot is cleared', async () => {
+    runPlannerMock.mockImplementation(async (opts) => {
+      opts.events?.emit({
+        kind: 'started',
+        runId: opts.runId!,
+        provider: 'anthropic',
+        model: opts.modelId,
+        cacheEnabled: true,
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      return {
+        planText: '# Plan\n',
+        budgetExhausted: false,
+        timedOut: false,
+        finishedNormally: true,
+        iterations: 1,
+        stats: {
+          turns: 1,
+          inputTokens: 3,
+          outputTokens: 4,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          cacheHitRatio: 0,
+          durationMs: 2,
+        },
+      };
+    });
+
+    const post = await fetch(`${baseUrl}/api/runs`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ feature: 'demo', storyId: '01-pull' }),
+    });
+    expect(post.status).toBe(202);
+    const { runId } = (await post.json()) as { runId: string };
+
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 10_000) {
+      const r = await fetch(`${baseUrl}/api/runs/active`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      const rows = (await r.json()) as { runId: string }[];
+      if (!rows.some((row) => row.runId === runId)) break;
+      await new Promise((res) => setTimeout(res, 25));
+    }
+
+    const runsDir = path.join(root, '.squad', 'runs');
+    fs.mkdirSync(runsDir, { recursive: true });
+    const diskLines = [
+      JSON.stringify({
+        kind: 'started',
+        runId,
+        provider: 'anthropic',
+        model: 'replay-m',
+        cacheEnabled: true,
+      }),
+      JSON.stringify({
+        kind: 'done',
+        runId,
+        success: true,
+        planFile: null,
+        partial: false,
+        stats: {
+          turns: 1,
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheCreationTokens: 0,
+          cacheReadTokens: 0,
+          cacheHitRatio: 0,
+          durationMs: 1,
+        },
+        durationMs: 1,
+      }),
+    ];
+    fs.writeFileSync(path.join(runsDir, `${runId}.events.jsonl`), `${diskLines.join('\n')}\n`, 'utf8');
+
+    const stream = await fetch(`${baseUrl}/api/runs/${runId}/stream?t=${encodeURIComponent(TOKEN)}`);
+    expect(stream.ok).toBe(true);
+    const text = await stream.text();
+    expect(text).toContain('event: started');
+    expect(text).toContain('"replay-m"');
+    expect(text).toContain('event: done');
+    expect(text).toContain('event: closed');
+    expect(text).not.toContain('unknown run');
   });
 
   it('DELETE /api/runs/:id aborts and stream eventually closes', async () => {

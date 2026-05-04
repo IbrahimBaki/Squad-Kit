@@ -18,6 +18,7 @@ import { composeSystemPrompt, composeUserPrompt, composeScoutSystemPrompt } from
 import { writePlanFile, buildMetadataHeader } from '../../planner/writer.js';
 import { writeLastRun } from '../../core/last-run.js';
 import { appendRun, listRuns, newRunId } from '../../core/runs.js';
+import { openRunEventsReader } from '../../core/run-events-store.js';
 import type { PlannerRunStats } from '../../planner/types.js';
 
 interface ActiveRun {
@@ -33,7 +34,7 @@ interface ActiveRun {
 
 const active = new Map<string, ActiveRun>();
 
-const EVENT_BUF_CAP = 512;
+const EVENT_BUF_CAP = 4096;
 
 const StartBody = z.object({
   feature: z.string().min(1),
@@ -163,135 +164,140 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
 
       let result;
       try {
-        result = await runPlanner({
-          root: opts.paths.root,
-          runtime: draftRuntime,
-          provider: planner.provider,
-          modelId,
-          anthropicProviderSpecific,
-          systemPrompt,
-          userPrompt,
-          budget,
-          maxOutputTokens: planner.maxOutputTokens,
-          cacheEnabled,
-          events: bus,
-          runId,
-          abort: controller.signal,
-          stages: {
+        try {
+          result = await runPlanner({
+            root: opts.paths.root,
+            runtime: draftRuntime,
+            provider: planner.provider,
+            modelId,
+            anthropicProviderSpecific,
+            systemPrompt,
+            userPrompt,
+            budget,
+            maxOutputTokens: planner.maxOutputTokens,
+            cacheEnabled,
+            events: bus,
+            runId,
+            paths: opts.paths,
+            abort: controller.signal,
+            stages: {
+              scout: {
+                enabled: scoutEnabled,
+                runtime: scoutRuntime,
+                modelId: scoutModelId,
+                maxFiles: maxScoutFiles,
+                maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
+              },
+            },
+            validation: { enabled: validationEnabled, strict: strictValidation },
+            toolsEnabled: planner.tools,
+            scoutSystemPrompt,
+          });
+        } catch (err) {
+          const durationMs = Date.now() - startedAt;
+          const last = eventBuffer[eventBuffer.length - 1];
+          const isRateLimitAbort = last?.kind === 'rate_limit' && last.phase === 'aborted';
+          if (!isRateLimitAbort) {
+            bus.emit({ kind: 'error', runId, message: (err as Error).message });
+          }
+          bus.emit({
+            kind: 'done',
+            runId,
+            success: false,
+            planFile: null,
+            partial: true,
+            stats: emptyStats(durationMs),
+            durationMs,
+          });
+          return;
+        }
+
+        const issueCount = result.validation?.issues.length ?? 0;
+        const issuesByKind = summariseIssuesByKind(result.validation?.issues ?? []);
+        const validationBlocks = strictValidation && validationEnabled && issueCount > 0;
+        const runSuccess =
+          result.finishedNormally && !result.timedOut && !result.userCancelled && !validationBlocks;
+        let planFile: string | null = null;
+        if (result.planText.trim()) {
+          const snap = budget.snapshot();
+          const header = buildMetadataHeader({
+            provider: planner.provider,
+            model: modelId,
+            reads: snap.reads,
+            bytes: snap.bytes,
+            inputTokens: snap.usage.inputTokens,
+            outputTokens: snap.usage.outputTokens,
+            durationMs: Date.now() - startedAt,
+            planStatus: runSuccess ? undefined : 'partial',
+            scoutEnabled,
+            validationEnabled,
+            validationIssueCount: issueCount,
+          });
+          const out = writePlanFile({
+            paths: opts.paths,
+            config: cfgFresh,
+            story,
+            planBodyMarkdown: result.planText,
+            metadataHeader: header,
+            partial: !runSuccess,
+          });
+          planFile = path.relative(opts.paths.root, out.planFile);
+        }
+
+        try {
+          await writeLastRun(opts.paths, {
+            stats: result.stats,
+            completedAt: new Date().toISOString(),
+            provider: planner.provider,
+            model: modelId,
+          });
+          await appendRun(opts.paths, {
+            runId,
+            provider: planner.provider,
+            model: modelId,
+            feature: story.feature,
+            storyId: story.id,
+            startedAt: new Date(startedAt).toISOString(),
+            completedAt: new Date().toISOString(),
+            success: runSuccess,
+            partial: !runSuccess,
+            planFile,
+            stats: result.stats,
+            cacheEnabled,
+            durationMs: Date.now() - startedAt,
             scout: {
               enabled: scoutEnabled,
-              runtime: scoutRuntime,
-              modelId: scoutModelId,
-              maxFiles: maxScoutFiles,
-              maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
+              selectedCount: result.scout?.selected.length,
+              tokensUsed: result.scout?.tokensUsed,
+              durationMs: result.scout?.durationMs,
             },
-          },
-          validation: { enabled: validationEnabled, strict: strictValidation },
-          toolsEnabled: planner.tools,
-          scoutSystemPrompt,
-        });
-      } catch (err) {
-        const durationMs = Date.now() - startedAt;
-        const last = eventBuffer[eventBuffer.length - 1];
-        const isRateLimitAbort = last?.kind === 'rate_limit' && last.phase === 'aborted';
-        if (!isRateLimitAbort) {
-          bus.emit({ kind: 'error', runId, message: (err as Error).message });
+            validation: {
+              enabled: validationEnabled,
+              issuesCount: issueCount,
+              issuesByKind,
+              durationMs: result.validation?.durationMs,
+            },
+            plannerRuntime: { kind: draftRuntime.kind, provider: planner.provider },
+            providerOptionsSnapshot: anthropicProviderSpecific
+              ? { anthropic: anthropicProviderSpecific }
+              : undefined,
+          });
+        } catch {
+          /* best-effort */
         }
+
         bus.emit({
           kind: 'done',
           runId,
-          success: false,
-          planFile: null,
-          partial: true,
-          stats: emptyStats(durationMs),
-          durationMs,
-        });
-        return;
-      }
-
-      const issueCount = result.validation?.issues.length ?? 0;
-      const issuesByKind = summariseIssuesByKind(result.validation?.issues ?? []);
-      const validationBlocks = strictValidation && validationEnabled && issueCount > 0;
-      const runSuccess =
-        result.finishedNormally && !result.timedOut && !result.userCancelled && !validationBlocks;
-      let planFile: string | null = null;
-      if (result.planText.trim()) {
-        const snap = budget.snapshot();
-        const header = buildMetadataHeader({
-          provider: planner.provider,
-          model: modelId,
-          reads: snap.reads,
-          bytes: snap.bytes,
-          inputTokens: snap.usage.inputTokens,
-          outputTokens: snap.usage.outputTokens,
-          durationMs: Date.now() - startedAt,
-          planStatus: runSuccess ? undefined : 'partial',
-          scoutEnabled,
-          validationEnabled,
-          validationIssueCount: issueCount,
-        });
-        const out = writePlanFile({
-          paths: opts.paths,
-          config: cfgFresh,
-          story,
-          planBodyMarkdown: result.planText,
-          metadataHeader: header,
-          partial: !runSuccess,
-        });
-        planFile = path.relative(opts.paths.root, out.planFile);
-      }
-
-      try {
-        await writeLastRun(opts.paths, {
-          stats: result.stats,
-          completedAt: new Date().toISOString(),
-          provider: planner.provider,
-          model: modelId,
-        });
-        await appendRun(opts.paths, {
-          runId,
-          provider: planner.provider,
-          model: modelId,
-          feature: story.feature,
-          storyId: story.id,
-          startedAt: new Date(startedAt).toISOString(),
-          completedAt: new Date().toISOString(),
           success: runSuccess,
-          partial: !runSuccess,
           planFile,
+          partial: !runSuccess,
           stats: result.stats,
-          cacheEnabled,
           durationMs: Date.now() - startedAt,
-          scout: {
-            enabled: scoutEnabled,
-            selectedCount: result.scout?.selected.length,
-            tokensUsed: result.scout?.tokensUsed,
-            durationMs: result.scout?.durationMs,
-          },
-          validation: {
-            enabled: validationEnabled,
-            issuesCount: issueCount,
-            issuesByKind,
-            durationMs: result.validation?.durationMs,
-          },
-          plannerRuntime: { kind: draftRuntime.kind, provider: planner.provider },
-          providerOptionsSnapshot: anthropicProviderSpecific
-            ? { anthropic: anthropicProviderSpecific }
-            : undefined,
         });
-      } catch {
-        /* best-effort */
+      } finally {
+        await bus.finalizeEventPersistence?.();
       }
-
-      bus.emit({
-        kind: 'done',
-        runId,
-        success: runSuccess,
-        planFile,
-        partial: !runSuccess,
-        stats: result.stats,
-        durationMs: Date.now() - startedAt,
-      });
     })().finally(() => {
       active.delete(runId);
     });
@@ -300,15 +306,54 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
     return c.json({ runId, eventStream: `/api/runs/${runId}/stream` }, 202);
   });
 
+  app.get('/api/runs/:runId/events', async (c) => {
+    const runId = c.req.param('runId');
+    const fromQ = Number(c.req.query('from') ?? 0);
+    const fromIndex = Number.isFinite(fromQ) ? Math.max(0, Math.floor(fromQ)) : 0;
+    const limQ = Number(c.req.query('limit') ?? 1000);
+    const limit = Math.min(
+      2000,
+      Math.max(1, Number.isFinite(limQ) ? Math.floor(limQ) : 1000),
+    );
+    const reader = await openRunEventsReader(opts.paths, runId);
+    if (!reader) return c.json({ error: 'not_found' }, 404);
+    const events: PlannerEvent[] = [];
+    for await (const e of reader.iterate({ fromIndex, limit })) events.push(e);
+    const total = await reader.count();
+    return c.json({ runId, fromIndex, limit, total, events });
+  });
+
+  app.get('/api/runs/:runId', async (c) => {
+    const runId = c.req.param('runId');
+    const all = await listRuns(opts.paths);
+    const rec = all.find((r) => r.runId === runId);
+    if (!rec) return c.json({ error: 'not_found' }, 404);
+    return c.json(rec);
+  });
+
   app.get('/api/runs/:runId/stream', (c) => {
     const runId = c.req.param('runId');
     const run = active.get(runId);
+    if (!run) {
+      return streamSSE(c, async (stream) => {
+        const reader = await openRunEventsReader(opts.paths, runId);
+        if (!reader) {
+          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: 'unknown run' }) });
+          await stream.writeSSE({ event: 'closed', data: '{}' });
+          return;
+        }
+        try {
+          for await (const e of reader.iterate()) {
+            await stream.writeSSE({ event: e.kind, data: JSON.stringify(e) });
+          }
+          await stream.writeSSE({ event: 'closed', data: '{}' });
+        } catch {
+          await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: 'replay_failed' }) });
+          await stream.writeSSE({ event: 'closed', data: '{}' });
+        }
+      });
+    }
     return streamSSE(c, async (stream) => {
-      if (!run) {
-        await stream.writeSSE({ event: 'error', data: JSON.stringify({ message: 'unknown run' }) });
-        await stream.writeSSE({ event: 'closed', data: '{}' });
-        return;
-      }
       let idx = 0;
       let resolveWaiter: (() => void) | null = null;
       const notify = () => resolveWaiter?.();
