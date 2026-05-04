@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-05-04
+
+### Bug fixes
+
+- Anthropic scout and draft attach extended thinking so Opus 4.7+ avoids
+  failed calls when the SDK would send incompatible temperature overrides.
+
 ## [0.9.0] — 2026-05-04
 
 ### What's new
