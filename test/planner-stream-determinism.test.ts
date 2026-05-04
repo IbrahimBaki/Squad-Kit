@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import type { LanguageModelV1StreamPart } from '@ai-sdk/provider';
 import { resolveModel } from '../src/planner/providers/index.js';
 import { runPlanner } from '../src/planner/loop.js';
+import { VercelRuntime } from '../src/planner/runtimes/vercel-runtime.js';
+import type { LanguageModelV1 } from 'ai';
 import { Budget } from '../src/planner/budget.js';
 import { MockLanguageModelV1, simulateReadableStream } from 'ai/test';
 
@@ -22,6 +24,10 @@ const budgetCfg = {
   maxDurationSeconds: 60,
 };
 
+function vercelRt(m: LanguageModelV1, id = 'mid') {
+  return new VercelRuntime('anthropic', id, m, true);
+}
+
 describe('planner stream / model resolution', () => {
   it('resolveModel wires the requested Anthropic model id on the client', () => {
     const { model, modelId } = resolveModel('anthropic', 'claude-opus-4-7', 'sk-test');
@@ -41,7 +47,7 @@ describe('planner stream / model resolution', () => {
     });
     await runPlanner({
       root: '/tmp',
-      model,
+      runtime: vercelRt(model),
       provider: 'anthropic',
       modelId: 'mid',
       systemPrompt: 'SYS',

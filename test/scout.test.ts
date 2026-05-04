@@ -16,6 +16,8 @@ vi.mock('ai', async (importOriginal) => {
 import { APICallError } from 'ai';
 import { runScout } from '../src/planner/stages/scout.js';
 import { Budget } from '../src/planner/budget.js';
+import { PlannerEventBus } from '../src/planner/events.js';
+import { VercelRuntime } from '../src/planner/runtimes/vercel-runtime.js';
 
 const mockModel = {} as import('ai').LanguageModelV1;
 
@@ -49,11 +51,15 @@ describe('runScout', () => {
   it('calls generateObject with maxTokens override', async () => {
     mockGenerateObject.mockResolvedValue(okPayload());
     const budget = new Budget({ maxFileReads: 10, maxContextBytes: 10000, maxDurationSeconds: 60 });
+    const bus = new PlannerEventBus();
+    const runtime = new VercelRuntime('anthropic', 'm', mockModel, true);
     await runScout({
-      model: mockModel,
+      runtime,
       systemPrompt: 's',
       userPrompt: 'u',
       budget,
+      bus,
+      runId: 'test',
       maxTokens: 4096,
     });
     expect(mockGenerateObject).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 4096 }));
@@ -62,11 +68,15 @@ describe('runScout', () => {
   it('defaults maxTokens to 2048 when omitted', async () => {
     mockGenerateObject.mockResolvedValue(okPayload());
     const budget = new Budget({ maxFileReads: 10, maxContextBytes: 10000, maxDurationSeconds: 60 });
+    const bus = new PlannerEventBus();
+    const runtime = new VercelRuntime('anthropic', 'm', mockModel, true);
     await runScout({
-      model: mockModel,
+      runtime,
       systemPrompt: 's',
       userPrompt: 'u',
       budget,
+      bus,
+      runId: 'test',
     });
     expect(mockGenerateObject).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 2048 }));
   });
@@ -86,11 +96,15 @@ describe('runScout', () => {
       )
       .mockResolvedValueOnce(okPayload());
     const budget = new Budget({ maxFileReads: 10, maxContextBytes: 10000, maxDurationSeconds: 60 });
+    const bus = new PlannerEventBus();
+    const runtime = new VercelRuntime('anthropic', 'm', mockModel, true);
     const p = runScout({
-      model: mockModel,
+      runtime,
       systemPrompt: 's',
       userPrompt: 'u',
       budget,
+      bus,
+      runId: 'test',
     });
     await vi.advanceTimersByTimeAsync(2500);
     await p;
@@ -110,12 +124,16 @@ describe('runScout', () => {
       }),
     );
     const budget = new Budget({ maxFileReads: 10, maxContextBytes: 10000, maxDurationSeconds: 60 });
+    const bus = new PlannerEventBus();
+    const runtime = new VercelRuntime('anthropic', 'm', mockModel, true);
     await expect(
       runScout({
-        model: mockModel,
+        runtime,
         systemPrompt: 's',
         userPrompt: 'u',
         budget,
+        bus,
+        runId: 'test',
       }),
     ).rejects.toMatchObject({ statusCode: 429 });
   });

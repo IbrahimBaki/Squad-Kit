@@ -6,6 +6,8 @@ import type { LanguageModelV1StreamPart } from '@ai-sdk/provider';
 import { APICallError } from 'ai';
 import { MockLanguageModelV1, simulateReadableStream } from 'ai/test';
 import { runPlanner, buildScoutedContextSection } from '../src/planner/loop.js';
+import { VercelRuntime } from '../src/planner/runtimes/vercel-runtime.js';
+import type { LanguageModelV1 } from 'ai';
 import { PlannerEventBus, type PlannerEvent } from '../src/planner/events.js';
 import * as scoutStages from '../src/planner/stages/scout.js';
 import { Budget } from '../src/planner/budget.js';
@@ -20,6 +22,10 @@ const budgetCfg = {
   maxContextBytes: 500_000,
   maxDurationSeconds: 120,
 };
+
+function vercelTestRuntime(model: LanguageModelV1, modelId = 'm') {
+  return new VercelRuntime('anthropic', modelId, model, true);
+}
 
 function tok(p: number, o: number) {
   return { promptTokens: p, completionTokens: o, totalTokens: p + o };
@@ -56,7 +62,7 @@ describe('runPlanner', () => {
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -87,7 +93,7 @@ describe('runPlanner', () => {
     ]);
     await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -124,7 +130,7 @@ describe('runPlanner', () => {
       const budget = new Budget(budgetCfg);
       const result = await runPlanner({
         root,
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -150,7 +156,7 @@ describe('runPlanner', () => {
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -177,7 +183,7 @@ describe('runPlanner', () => {
     const decideOnLimit = vi.fn().mockResolvedValue('continue' as const);
     const result = await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -200,7 +206,7 @@ describe('runPlanner', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -241,7 +247,7 @@ describe('runPlanner', () => {
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -294,7 +300,7 @@ describe('runPlanner', () => {
     });
     await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelTestRuntime(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -330,7 +336,7 @@ describe('runPlanner', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -377,7 +383,7 @@ describe('runPlanner', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -400,7 +406,7 @@ describe('runPlanner', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -431,7 +437,7 @@ describe('runPlanner', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model,
+        runtime: vercelTestRuntime(model, 'claude-x'),
         provider: 'anthropic',
         modelId: 'claude-x',
         systemPrompt: 'sys',
@@ -472,7 +478,7 @@ describe('runPlanner', () => {
       const budget = new Budget({ ...budgetCfg, maxFileReads: 1 });
       const result = await runPlanner({
         root,
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -520,7 +526,7 @@ describe('runPlanner', () => {
     try {
       const result = await runPlanner({
         root,
-        model,
+        runtime: vercelTestRuntime(model),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
@@ -583,13 +589,13 @@ describe('runPlanner scout configuration', () => {
     await expect(
       runPlanner({
         root: os.tmpdir(),
-        model: draftModel,
+        runtime: vercelTestRuntime(draftModel),
         provider: 'anthropic',
         modelId: 'm',
         systemPrompt: 'sys',
         userPrompt: 'user',
         budget: new Budget(budgetCfg),
-        stages: { scout: { enabled: true, model: draftModel, modelId: 'scout' } },
+        stages: { scout: { enabled: true, runtime: vercelTestRuntime(draftModel, 'scout'), modelId: 'scout' } },
         scoutSystemPrompt: '   ',
       }),
     ).rejects.toThrow(/scoutSystemPrompt/);
@@ -603,13 +609,13 @@ describe('runPlanner scout configuration', () => {
     const draftModel = queueStreamModel([[{ type: 'finish', finishReason: 'stop', usage: tok(1, 1) }]]);
     await runPlanner({
       root: os.tmpdir(),
-      model: draftModel,
+      runtime: vercelTestRuntime(draftModel),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
       userPrompt: 'user',
       budget: new Budget(budgetCfg),
-      stages: { scout: { enabled: true, model: draftModel, modelId: 'scout' } },
+      stages: { scout: { enabled: true, runtime: vercelTestRuntime(draftModel, 'scout'), modelId: 'scout' } },
       scoutSystemPrompt: 'scout sys',
       events: bus,
     });

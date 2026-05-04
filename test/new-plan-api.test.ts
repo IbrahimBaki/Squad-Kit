@@ -12,17 +12,25 @@ import { READ_FILE_TOOL_NAME } from '../src/planner/tools/index.js';
 
 const { mockDoStream } = vi.hoisted(() => ({ mockDoStream: vi.fn() }));
 
-vi.mock('../src/planner/providers/index.js', () => ({
-  resolveModel: () => ({
-    provider: 'anthropic' as const,
-    modelId: 'claude-3-5-sonnet-latest',
-    model: new MockLanguageModelV1({
-      provider: 'anthropic.messages',
-      modelId: 'claude-3-5-sonnet-latest',
-      doStream: mockDoStream,
-    }),
-  }),
-}));
+vi.mock('../src/planner/runtimes/index.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/planner/runtimes/index.js')>();
+  const { MockLanguageModelV1 } = await import('ai/test');
+  const { VercelRuntime } = await import('../src/planner/runtimes/vercel-runtime.js');
+  return {
+    ...actual,
+    resolveRuntime: () =>
+      new VercelRuntime(
+        'anthropic',
+        'claude-3-5-sonnet-latest',
+        new MockLanguageModelV1({
+          provider: 'anthropic.messages',
+          modelId: 'claude-3-5-sonnet-latest',
+          doStream: mockDoStream,
+        }),
+        true,
+      ),
+  };
+});
 
 function streamOk(chunks: LanguageModelV1StreamPart[]) {
   return {

@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { LanguageModelV1StreamPart } from '@ai-sdk/provider';
 import { MockLanguageModelV1, simulateReadableStream } from 'ai/test';
 import { runPlanner } from '../src/planner/loop.js';
+import { VercelRuntime } from '../src/planner/runtimes/vercel-runtime.js';
+import type { LanguageModelV1 } from 'ai';
 import { Budget } from '../src/planner/budget.js';
 import { READ_FILE_TOOL_NAME } from '../src/planner/tools/index.js';
 
@@ -29,8 +31,12 @@ function streamOk(chunks: LanguageModelV1StreamPart[]) {
   };
 }
 
+function vercelRt(m: LanguageModelV1, id = 'm') {
+  return new VercelRuntime('anthropic', id, m, true);
+}
+
 describe('PlannerRunStats aggregation', () => {
-  it('multi-turn run sums usage and cache fields from each turn', async () => {
+  it('aggregates token and cache stats across tool+text turns', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'squad-stats-'));
     fs.writeFileSync(path.join(root, 'a.txt'), 'a', 'utf8');
     let i = 0;
@@ -72,7 +78,7 @@ describe('PlannerRunStats aggregation', () => {
     const budget = new Budget(budgetCfg);
     const result = await runPlanner({
       root,
-      model,
+      runtime: vercelRt(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 'sys',
@@ -101,7 +107,7 @@ describe('PlannerRunStats aggregation', () => {
     });
     const result = await runPlanner({
       root: os.tmpdir(),
-      model,
+      runtime: vercelRt(model),
       provider: 'anthropic',
       modelId: 'm',
       systemPrompt: 's',
