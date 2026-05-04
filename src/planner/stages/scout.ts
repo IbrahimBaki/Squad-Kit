@@ -2,6 +2,7 @@ import { APICallError, generateObject, NoObjectGeneratedError } from 'ai';
 import { z } from 'zod';
 import type { LanguageModelV1 } from 'ai';
 import type { Budget } from '../budget.js';
+import type { ProviderName } from '../types.js';
 import { parseRetryAfterSec } from '../provider-errors.js';
 import { usageFromLanguageModelStep } from '../usage-map.js';
 
@@ -24,6 +25,8 @@ export type ScoutOutput = z.infer<typeof ScoutOutputSchema>;
 
 export async function runScout(input: {
   model: LanguageModelV1;
+  /** Provider name; used to attach provider-specific request options. */
+  provider?: ProviderName;
   systemPrompt: string;
   userPrompt: string;
   budget: Budget;
@@ -31,6 +34,13 @@ export async function runScout(input: {
   maxTokens?: number;
 }): Promise<{ output: ScoutOutput; usage: { inputTokens: number; outputTokens: number } } | null> {
   const maxTokens = input.maxTokens ?? 2048;
+  // ai@4.x defaults `temperature: 0` and @ai-sdk/anthropic@1.x always passes it to the wire
+  // unless extended thinking is on. Anthropic Opus 4.7+ rejects temperature entirely; enabling
+  // thinking strips it via the adapter and gives the scout a small reasoning budget.
+  const anthropicThinking =
+    input.provider === 'anthropic'
+      ? { anthropic: { thinking: { type: 'enabled' as const, budgetTokens: 1024 } } }
+      : undefined;
 
   let attempt = 0;
   while (true) {
@@ -42,6 +52,7 @@ export async function runScout(input: {
         schema: ScoutOutputSchema,
         maxTokens,
         abortSignal: input.abort,
+        ...(anthropicThinking ? { providerOptions: anthropicThinking } : {}),
       });
       const u = usageFromLanguageModelStep(usage, providerMetadata);
       input.budget.recordUsage(u);

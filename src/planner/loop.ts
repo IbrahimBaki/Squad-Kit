@@ -612,6 +612,15 @@ async function runDraftStage(input: RunPlannerInput): Promise<DraftStageOutput> 
         maxRetries: 0,
         maxTokens: maxOut.current,
         abortSignal: input.abort,
+        // ai@4.x defaults `temperature: 0` (prepareCallSettings) and @ai-sdk/anthropic@1.x
+        // always passes it to the wire unless extended thinking is on. Anthropic Opus 4.7+
+        // rejects temperature entirely. Enabling thinking on Anthropic strips temperature
+        // via the adapter and gives the planner reasoning budget for free.
+        ...(input.provider === 'anthropic' && {
+          providerOptions: {
+            anthropic: { thinking: { type: 'enabled' as const, budgetTokens: 2048 } },
+          },
+        }),
         onChunk: ({ chunk }) => {
           if (chunk.type === 'text-delta') {
             accumulatedText += chunk.textDelta;
@@ -843,6 +852,7 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
     try {
       const scoutRes = await runScout({
         model: scoutModel,
+        provider: input.provider,
         systemPrompt: input.scoutSystemPrompt,
         userPrompt: input.userPrompt,
         budget: input.budget,
