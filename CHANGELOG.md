@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### What's new
+
+- **Anthropic** defaults to **`@anthropic-ai/claude-agent-sdk`** (`planner.runtime.anthropic: 'agent-sdk'`) so the default plan model **`claude-opus-4-7`** can use adaptive thinking and effort on supported API shapes. **OpenAI** and **Google** remain on the **Vercel AI SDK**.
+- Config: `planner.providerOptions.anthropic.thinking`, `effort`, `effortByPhase`, `thinkingBudget`; CLI: `--anthropic-runtime`, `--effort`, `--scout-effort`, `--no-thinking`.
+- CLI summary includes a **`runtime`** row; run records may store **`runtime`** and **`providerOptionsSnapshot`** for dashboards and evals.
+
+### Known limitations (Agent SDK runtime)
+
+- Cache **metrics** are not exposed by the SDK — the cache line shows **`(agent-sdk: not exposed)`**; caching **behaviour** still applies.
+- **Per-turn** token usage is not available — live UI shows **aggregate-only** counts until the run completes.
+- **`AbortSignal`** cancels the client loop; the HTTP request may still complete (small possible cost leak).
+
+### Internal
+
+- **`PlannerRuntime`** abstraction with **`AgentSdkRuntime`** and **`VercelRuntime`**; shared **`PlannerToolDefinition`** builders.
+- Doctor: **`planner-runtime`**, **`planner-anthropic-runtime-model-fit`**, **`agent-sdk-binary-present`**.
+- Integration smoke: `test/integration/agent-sdk.smoke.test.ts` with `SQUAD_INTEGRATION_TEST=1` and `ANTHROPIC_API_KEY` (optional `SQUAD_AGENT_SDK_SMOKE_MODEL`).
+- **Published CLI** no longer ships `dist/cli.js.map` by default; set **`SQUAD_TSUP_SOURCEMAP=1`** when running `tsup` if you need a source map locally.
+
 ## [0.9.1] — 2026-05-04
 
 ### Bug fixes

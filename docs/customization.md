@@ -57,6 +57,19 @@ planner:
 
 Use this when you need to **ride ahead** of a squad-kit release (provider ships a new id) or **pin** a specific snapshot. **`squad status`** appends **`(override)`** to the planner line when an override is active for the current provider. **`squad doctor`** checks the resolved id against the provider’s **model list** API (a cheap HTTP call — **not** a paid chat completion) and reports if the id is missing.
 
+## Planner runtimes (Anthropic: Agent SDK vs Vercel)
+
+For **Anthropic**, the planner uses **`@anthropic-ai/claude-agent-sdk`** by default so the **default plan model** (`claude-opus-4-7`) can use **adaptive thinking** and **effort** on the wire shapes Anthropic expects. **OpenAI** and **Google** stay on the **Vercel AI SDK** path (`streamText` / `generateObject`); there is no Agent SDK option for those providers.
+
+- **Switch runtime:** `planner.runtime.anthropic: 'agent-sdk' | 'vercel'` (default **`agent-sdk`**) or per-run **`--anthropic-runtime agent-sdk|vercel`**. Legacy **`vercel`** may not work with Opus 4.7+; **`squad doctor`** warns when the combo is unsafe unless you override the model to a pre–4.7 id (e.g. Sonnet 4.5).
+- **Thinking and effort** (Agent SDK only; stored under `planner.providerOptions.anthropic`):
+  - `thinking: 'adaptive' | 'enabled' | 'disabled' | 'off'` (default **`adaptive`**). With **`enabled`**, use **`thinkingBudget`** for the token budget.
+  - `effort: 'minimal' | 'medium' | 'high'` (default **`medium`**).
+  - `effortByPhase: { scout?, draft? }` — e.g. **`minimal`** for scout and **`high`** for draft.
+- **CLI overrides:** `--effort`, `--scout-effort`, `--no-thinking` (maps to thinking off for that run).
+
+**Known limitations of the Agent SDK path** (see **`CHANGELOG.md`**): cache creation/read **counts** are not exposed (CLI shows **`(agent-sdk: not exposed)`**; caching behaviour still applies). **Per-turn** token usage is not available (live UI is **aggregate-only** until the run ends). **Cancellation** stops the client iterator; the upstream request may still run to completion.
+
 ## Copy-paste vs direct API for plans
 
 - **Copy-paste** (`squad new-plan` without a working key, or with **`--copy`**) — composes the **generate-plan** prompt with your intake, prints to **stdout**, and **copies to the clipboard** unless **`--no-clipboard`**. You paste into any agent. No provider bill from squad-kit for the compose step; your agent session may still charge.

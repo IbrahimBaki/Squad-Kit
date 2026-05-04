@@ -79,6 +79,10 @@ The top bar lists **recent project roots** from `~/.squad/recent-projects.json`.
 
 For Vite hot reload against a running `squad console`, see [`console-ui/README.md`](../console-ui/README.md).
 
+## Generate page and Agent SDK runs
+
+On the **Generate** stream, the **cache** summary line shows **`(agent-sdk: not exposed)`** when the run used the Anthropic **Agent SDK** runtime: prompt cache still applies on Anthropic’s side, but the SDK does not surface **`cache_creation_input_tokens`** / **`cache_read_input_tokens`** in telemetry. Token rows may stay **aggregate-only** during the run until the final usage event.
+
 ## Troubleshooting
 
 | Issue | What to do |
