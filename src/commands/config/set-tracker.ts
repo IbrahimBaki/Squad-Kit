@@ -6,6 +6,7 @@ import { loadConfig, saveConfig, type SquadConfig, type TrackerType } from '../.
 import { loadSecrets, saveSecrets, mergeSecrets, type SquadSecrets } from '../../core/secrets.js';
 import { clientFor, overlayTrackerEnv } from '../../tracker/index.js';
 import { probeJiraConnectivity, probeAzureConnectivity, probeGitHubConnectivity } from '../../core/probes.js';
+import { skipExternalProbesInAutomation } from '../../core/ci-env.js';
 import { isInteractive } from '../../ui/tty.js';
 import { promptJiraCredentials, promptAzureCredentials, promptGitHubCredentials } from './shared.js';
 
@@ -181,7 +182,7 @@ export async function runConfigSetTracker(opts: ConfigSetTrackerOptions = {}): P
     ui.kv('project', next.tracker.project, 10);
   }
 
-  if (process.env.CI === 'true') {
+  if (skipExternalProbesInAutomation()) {
     printTrackerNextSteps(next.tracker.type);
     return;
   }

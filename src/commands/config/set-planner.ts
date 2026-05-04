@@ -10,6 +10,7 @@ import type { PlannerConfig, ProviderName } from '../../planner/types.js';
 import { isInteractive } from '../../ui/tty.js';
 import { mergePlannerKeyIntoSecrets, newPlannerBlock } from './shared.js';
 import { runConfigUnsetPlanner } from './unset-planner.js';
+import { skipExternalProbesInAutomation } from '../../core/ci-env.js';
 
 function parseProvider(arg: string): ProviderName {
   if (!['anthropic', 'openai', 'google'].includes(arg)) {
@@ -156,20 +157,27 @@ export async function runConfigSetPlanner(opts: ConfigSetPlannerOptions = {}): P
     ui.kv('credential', `${cred.source} (${sourceText})`, 10);
   }
 
-  if (process.env.CI === 'true' || !cred) {
+  if (skipExternalProbesInAutomation() || !cred) {
     printPlannerNextSteps(Boolean(cred));
     return;
   }
-  const listed = await fetchProviderModelIds(provider, cred.value);
-  if (!listed.ok) {
-    const st = listed.status;
-    if (st === 401 || st === 403) {
-      ui.warning(`Could not list models (HTTP ${st}); check your key.`);
+  try {
+    const listed = await fetchProviderModelIds(provider, cred.value);
+    if (!listed.ok) {
+      const st = listed.status;
+      if (st === 401 || st === 403) {
+        ui.warning(`Could not list models (HTTP ${st}); check your key.`);
+      } else {
+        ui.warning(`Model list probe failed (HTTP ${st}): ${listed.body.slice(0, 120)}`);
+      }
     } else {
-      ui.warning(`Model list probe failed (HTTP ${st}): ${listed.body.slice(0, 120)}`);
+      ui.info('Credential check: models API responded OK for this key.');
     }
-  } else {
-    ui.info('Credential check: models API responded OK for this key.');
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    ui.warning(
+      `Could not reach provider model list (${msg.slice(0, 160)}). Key was saved; run \`squad doctor\` to verify.`,
+    );
   }
 
   printPlannerNextSteps(true);
