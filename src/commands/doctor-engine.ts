@@ -421,6 +421,76 @@ export async function checkPlannerCache(paths: SquadPaths, ctx: DoctorContext): 
   };
 }
 
+async function checkPlannerRuntimeInfo(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
+  if (!ctx.config?.planner?.enabled) {
+    return {
+      id: 'planner-runtime-info',
+      name: 'planner runtime (resolved)',
+      status: 'skip',
+      detail: 'planner disabled',
+    };
+  }
+  const p = ctx.config.planner;
+  const anth = p.provider === 'anthropic' ? (p.runtime?.anthropic ?? 'agent-sdk') : 'vercel (openai/google use Vercel AI SDK)';
+  return {
+    id: 'planner-runtime-info',
+    name: 'planner runtime (resolved)',
+    status: 'ok',
+    detail: `${p.provider} → ${String(anth)}`,
+  };
+}
+
+function anthropicPlanModelLooksPost47(modelId: string): boolean {
+  return /opus[-_]4[-._]?7/i.test(modelId) || /claude-opus-4-7/i.test(modelId);
+}
+
+async function checkPlannerAnthropicRuntimeModelFit(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
+  const id = 'planner-anthropic-runtime-model-fit';
+  const name = 'Anthropic Opus 4.7+ vs Vercel runtime';
+  if (!ctx.config?.planner?.enabled || ctx.config.planner.provider !== 'anthropic') {
+    return { id, name, status: 'skip', detail: 'not applicable' };
+  }
+  const p = ctx.config.planner;
+  if ((p.runtime?.anthropic ?? 'agent-sdk') !== 'vercel') {
+    return { id, name, status: 'ok', detail: 'using Agent SDK or default' };
+  }
+  const planModel = modelFor('anthropic', 'plan', p.modelOverride);
+  if (!anthropicPlanModelLooksPost47(planModel)) {
+    return { id, name, status: 'ok', detail: `${planModel} is fine on the Vercel runtime` };
+  }
+  return {
+    id,
+    name,
+    status: 'warn',
+    detail: `Plan model ${planModel} needs the Agent SDK request shape; config uses Vercel runtime.`,
+    fixHint:
+      'Remove planner.runtime.anthropic: vercel (default is agent-sdk), or set planner.modelOverride.anthropic to a pre-4.7 id (e.g. claude-sonnet-4-5-20250929).',
+  };
+}
+
+async function checkAgentSdkBinaryPresent(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
+  const id = 'agent-sdk-binary-present';
+  const name = 'Anthropic Agent SDK install';
+  if (!ctx.config?.planner?.enabled || ctx.config.planner.provider !== 'anthropic') {
+    return { id, name, status: 'skip', detail: 'not applicable' };
+  }
+  if ((ctx.config.planner.runtime?.anthropic ?? 'agent-sdk') === 'vercel') {
+    return { id, name, status: 'skip', detail: 'vercel runtime selected' };
+  }
+  try {
+    await import('@anthropic-ai/claude-agent-sdk');
+    return { id, name, status: 'ok', detail: 'package resolves' };
+  } catch (e) {
+    return {
+      id,
+      name,
+      status: 'warn',
+      detail: (e as Error).message.slice(0, 160),
+      fixHint: 'Run pnpm install / npm install in the squad-kit package so the Agent SDK (and its platform binary) is present.',
+    };
+  }
+}
+
 async function checkTrackerConfig(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
   if (!ctx.config) {
     return { id: 'tracker-config', name: 'tracker configuration', status: 'skip', detail: 'config unavailable' };
@@ -567,6 +637,9 @@ export async function runAllChecks(paths: SquadPaths, ctx: DoctorContext, fix: b
   await add('planner model resolves at provider', () => checkPlannerModel(paths, ctx));
   await add('planner tier vs. model', () => checkPlannerTierAwareness(paths, ctx));
   await add('planner cache effectiveness', () => checkPlannerCache(paths, ctx));
+  await add('planner runtime (resolved)', () => checkPlannerRuntimeInfo(paths, ctx));
+  await add('Anthropic Opus 4.7+ vs Vercel runtime', () => checkPlannerAnthropicRuntimeModelFit(paths, ctx));
+  await add('Anthropic Agent SDK install', () => checkAgentSdkBinaryPresent(paths, ctx));
   await add('tracker configuration', () => checkTrackerConfig(paths, ctx));
   await add('tracker credential resolves', () => checkTrackerCredential(paths, ctx));
   await add('tracker connectivity', () => checkTrackerConnectivity(paths, ctx));

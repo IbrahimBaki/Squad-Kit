@@ -11,6 +11,15 @@ const MAX_ENTRIES_PER_LIST = 200;
 
 export const LIST_DIR_TOOL_NAME = 'list_dir';
 
+export const listDirSchema = z.object({
+  path: z.string().describe('Repo-relative directory path. Use "." for the project root.'),
+});
+
+export const LIST_DIR_TOOL_DESCRIPTION =
+  'List the contents of a directory in the project (one level deep). ' +
+  'Returns up to 200 entries with type (file/dir) and size. ' +
+  'Cheap; use this to discover sibling files before reading them.';
+
 export interface ListDirToolHooks {
   runId: string;
   turn: number;
@@ -22,13 +31,8 @@ type EntryRow = { type: 'f' | 'd'; name: string; size: number | null };
 
 export function listDirToolFactory(root: string, budget: Budget, hooks: ListDirToolHooks) {
   return tool({
-    description:
-      'List the contents of a directory in the project (one level deep). ' +
-      'Returns up to 200 entries with type (file/dir) and size. ' +
-      'Cheap; use this to discover sibling files before reading them.',
-    parameters: z.object({
-      path: z.string().describe('Repo-relative directory path. Use "." for the project root.'),
-    }),
+    description: LIST_DIR_TOOL_DESCRIPTION,
+    parameters: listDirSchema,
     execute: async (args, { toolCallId }) => {
       const tc: ToolCall = {
         id: toolCallId,
@@ -52,7 +56,7 @@ export function listDirToolFactory(root: string, budget: Budget, hooks: ListDirT
   });
 }
 
-function runListDir(root: string, budget: Budget, rawPath: string): { content: string; isError: boolean } {
+export function runListDir(root: string, budget: Budget, rawPath: string): { content: string; isError: boolean } {
   const exec = budget.canExecuteTool();
   if (!exec.ok) {
     return {

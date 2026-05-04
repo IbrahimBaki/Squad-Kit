@@ -107,6 +107,28 @@ function mergePlanner(
       enabled: override.validation?.enabled ?? base?.validation?.enabled ?? true,
       strict: override.validation?.strict ?? base?.validation?.strict ?? false,
     },
+    runtime: {
+      anthropic: override.runtime?.anthropic ?? base?.runtime?.anthropic ?? 'agent-sdk',
+    },
+    providerOptions: {
+      anthropic: {
+        thinking:
+          override.providerOptions?.anthropic?.thinking ?? base?.providerOptions?.anthropic?.thinking ?? 'adaptive',
+        effort: override.providerOptions?.anthropic?.effort ?? base?.providerOptions?.anthropic?.effort ?? 'medium',
+        effortByPhase: {
+          scout:
+            override.providerOptions?.anthropic?.effortByPhase?.scout ??
+            base?.providerOptions?.anthropic?.effortByPhase?.scout ??
+            'minimal',
+          draft:
+            override.providerOptions?.anthropic?.effortByPhase?.draft ??
+            base?.providerOptions?.anthropic?.effortByPhase?.draft ??
+            'medium',
+        },
+        thinkingBudget:
+          override.providerOptions?.anthropic?.thinkingBudget ?? base?.providerOptions?.anthropic?.thinkingBudget,
+      },
+    },
   };
   // Normalise: drop undefined/null entries; remove modelOverride entirely if nothing left (clean YAML).
   if (merged.modelOverride) {
@@ -193,6 +215,12 @@ export function parseConfig(raw: string, configFile: string): SquadConfig {
     if (merged.planner.budget.maxDurationSeconds <= 0) {
       throw new Error(
         'planner.budget.maxDurationSeconds must be > 0. Run `squad config set planner` to fix planner.budget values.',
+      );
+    }
+    const ar = merged.planner.runtime?.anthropic;
+    if (ar !== undefined && ar !== 'agent-sdk' && ar !== 'vercel') {
+      throw new Error(
+        'planner.runtime.anthropic must be agent-sdk or vercel. Run `squad config set planner` to fix it.',
       );
     }
   }

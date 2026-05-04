@@ -4,9 +4,17 @@ export function formatTokenK(n: number): string {
   return `${(n / 1000).toFixed(1)}k`;
 }
 
-export function formatPlannerCacheLine(opts: { cacheEnabled: boolean; stats: PlannerRunStats }): string {
+export function formatPlannerCacheLine(opts: {
+  cacheEnabled: boolean;
+  stats: PlannerRunStats;
+  /** Anthropic Agent SDK does not surface cache token metrics. */
+  plannerRuntimeKind?: 'vercel' | 'agent-sdk';
+}): string {
   if (!opts.cacheEnabled) {
     return 'cache disabled';
+  }
+  if (opts.plannerRuntimeKind === 'agent-sdk') {
+    return '(agent-sdk: not exposed)';
   }
   const { stats } = opts;
   if (stats.cacheReadTokens > 0) {

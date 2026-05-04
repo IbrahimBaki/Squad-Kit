@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { PlannerRunStats } from '../planner/types.js';
+import type { ProviderName } from '../planner/types.js';
+import type { AnthropicProviderSpecific } from '../planner/runtimes/types.js';
 import type { SquadPaths } from './paths.js';
 
 export interface RunRecord {
@@ -19,6 +21,12 @@ export interface RunRecord {
   cacheEnabled: boolean;
   durationMs: number;
   version: 1;
+  /** Present on new runs: which planner LLM runtime was used (Anthropic Agent SDK vs Vercel AI SDK). */
+  plannerRuntime?: { kind: 'vercel' | 'agent-sdk'; provider: ProviderName };
+  /** Snapshot of Anthropic Agent SDK tuning for this run (optional). */
+  providerOptionsSnapshot?: {
+    anthropic?: { draft?: AnthropicProviderSpecific; scout?: AnthropicProviderSpecific };
+  };
   scout?: { enabled: boolean; selectedCount?: number; tokensUsed?: number; durationMs?: number };
   validation?: {
     enabled: boolean;

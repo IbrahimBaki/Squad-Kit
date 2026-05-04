@@ -8,7 +8,8 @@ export default defineConfig({
   target: 'node18',
   platform: 'node',
   clean: false,
-  sourcemap: true,
+  /** Omit from `dist/` by default so the npm tarball stays under size:guard; set `SQUAD_TSUP_SOURCEMAP=1` for local maps. */
+  sourcemap: process.env.SQUAD_TSUP_SOURCEMAP === '1',
   shims: true,
   banner: { js: '#!/usr/bin/env node' },
 });

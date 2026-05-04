@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import * as ui from './ui/index.js';
 import { isSquadExit } from './core/cli-exit.js';
 import { runInit, type InitOptions } from './commands/init.js';
@@ -101,6 +101,27 @@ program
   )
   .option('--no-validation', 'Disable post-write validation', false)
   .option('--strict-validation', 'Write partial plan when validation finds issues', false)
+  .addOption(
+    new Option('--anthropic-runtime <mode>', 'Anthropic only: agent-sdk or legacy vercel AI SDK').choices([
+      'agent-sdk',
+      'vercel',
+    ]),
+  )
+  .addOption(
+    new Option('--effort <name>', 'Anthropic Agent SDK: draft-stage effort').choices([
+      'minimal',
+      'medium',
+      'high',
+    ]),
+  )
+  .addOption(
+    new Option('--scout-effort <name>', 'Anthropic Agent SDK: scout-stage effort').choices([
+      'minimal',
+      'medium',
+      'high',
+    ]),
+  )
+  .option('--no-thinking', 'Anthropic Agent SDK: disable extended thinking for this run', false)
   .action(wrapArgs(runNewPlan));
 
 program.command('status').description('Show squad-kit workspace status').action(wrap(runStatus));

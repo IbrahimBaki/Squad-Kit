@@ -28,6 +28,18 @@ export interface PlannerValidationConfig {
   strict?: boolean;
 }
 
+export type AnthropicPlannerThinkingMode = 'adaptive' | 'enabled' | 'disabled' | 'off';
+
+export type AnthropicPlannerEffort = 'minimal' | 'medium' | 'high';
+
+export interface AnthropicPlannerProviderOptions {
+  thinking?: AnthropicPlannerThinkingMode;
+  effort?: AnthropicPlannerEffort;
+  effortByPhase?: { scout?: AnthropicPlannerEffort; draft?: AnthropicPlannerEffort };
+  /** Used when `thinking` is `enabled` (fixed budget). */
+  thinkingBudget?: number;
+}
+
 export interface PlannerConfig {
   enabled: boolean;
   provider: ProviderName;
@@ -58,6 +70,13 @@ export interface PlannerConfig {
   stages?: PlannerStagesConfig;
   tools?: PlannerToolsConfig;
   validation?: PlannerValidationConfig;
+  /**
+   * Planner LLM runtime. Anthropic defaults to the Agent SDK so Opus 4.7+ request shapes work;
+   * OpenAI and Google always use the Vercel AI SDK path inside the implementation.
+   */
+  runtime?: { anthropic?: 'agent-sdk' | 'vercel' };
+  /** Provider-specific request tuning (Anthropic thinking/effort for Agent SDK path). */
+  providerOptions?: { anthropic?: AnthropicPlannerProviderOptions };
 }
 
 export interface PlannerRunStats {

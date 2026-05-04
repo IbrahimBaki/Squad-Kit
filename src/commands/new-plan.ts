@@ -15,7 +15,8 @@ import {
   printPlannerLimitExplanation,
   printPlannerLimitNextSteps,
 } from '../planner/planner-limit-messages.js';
-import { resolveModel } from '../planner/providers/index.js';
+import { resolveRuntime, extractAnthropicProviderSpecific } from '../planner/runtimes/index.js';
+import type { AnthropicProviderSpecific } from '../planner/runtimes/types.js';
 import { Budget } from '../planner/budget.js';
 import { buildRepoMap } from '../core/repo-map.js';
 import { composeSystemPrompt, composeUserPrompt, composeScoutSystemPrompt } from '../planner/system-prompt.js';
@@ -30,6 +31,14 @@ import { buildPlansIndex } from '../core/plans-index.js';
 import { summariseIssuesByKind } from '../planner/validation.js';
 
 export interface NewPlanOptions {
+  /** Override `planner.runtime.anthropic` for this run (`agent-sdk` default). */
+  anthropicRuntime?: 'agent-sdk' | 'vercel';
+  /** Anthropic Agent SDK only: draft-stage effort (`minimal` → API `low`). */
+  effort?: 'minimal' | 'medium' | 'high';
+  /** Anthropic Agent SDK only: scout-stage effort. */
+  scoutEffort?: 'minimal' | 'medium' | 'high';
+  /** Anthropic Agent SDK only: disable extended thinking for this run. */
+  noThinking?: boolean;
   /** Default true; `--no-clipboard` sets false (copy-paste mode only). */
   clipboard?: boolean;
   /** `--copy` — force copy-paste mode. */
@@ -201,13 +210,43 @@ async function emitViaApi(
   }
 
   const modelId = modelFor(planner.provider, 'plan', planner.modelOverride);
-  const { model } = resolveModel(planner.provider, modelId, apiKey);
+
+  const anthropicRuntimeChoice =
+    opts.anthropicRuntime ?? planner.runtime?.anthropic ?? 'agent-sdk';
+
+  const draftRuntime = resolveRuntime({
+    provider: planner.provider,
+    modelId,
+    apiKey,
+    anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
+  });
+
+  const thinkingCli = opts.noThinking ? ('off' as const) : undefined;
+  const anthropicProviderSpecific: { scout?: AnthropicProviderSpecific; draft?: AnthropicProviderSpecific } | undefined =
+    planner.provider === 'anthropic'
+      ? {
+          draft: extractAnthropicProviderSpecific(planner, 'draft', {
+            effort: opts.effort,
+            thinking: thinkingCli,
+          }),
+          scout: extractAnthropicProviderSpecific(planner, 'scout', {
+            effort: opts.scoutEffort,
+            thinking: thinkingCli,
+          }),
+        }
+      : undefined;
+
   const budget = new Budget(planner.budget);
 
   ui.banner();
   ui.step(`planning   ${story.feature} / ${story.id}`);
   ui.kv('provider', planner.provider);
   ui.kv('model', modelId);
+  ui.kv(
+    'runtime',
+    `${draftRuntime.kind} · ${draftRuntime.providerName}` +
+      (planner.provider === 'anthropic' ? ` (${anthropicRuntimeChoice})` : ''),
+  );
   ui.kv(
     'budget',
     `${planner.budget.maxFileReads} reads · ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB · ${planner.budget.maxDurationSeconds}s`,
@@ -241,7 +280,7 @@ async function emitViaApi(
   const maxScoutFiles = opts.maxScoutFiles ?? planner.stages?.scout?.maxFiles ?? 12;
 
   let scoutModelId = '';
-  let scoutModelHandle: ReturnType<typeof resolveModel>['model'] | undefined;
+  let scoutRuntime: ReturnType<typeof resolveRuntime> | undefined;
   let scoutSystemPrompt: string | undefined;
   if (scoutEnabled) {
     scoutModelId = modelFor(
@@ -250,7 +289,12 @@ async function emitViaApi(
       planner.modelOverride,
       opts.scoutModel ?? planner.stages?.scout?.modelOverride,
     );
-    scoutModelHandle = resolveModel(planner.provider, scoutModelId, apiKey).model;
+    scoutRuntime = resolveRuntime({
+      provider: planner.provider,
+      modelId: scoutModelId,
+      apiKey,
+      anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
+    });
     scoutSystemPrompt = composeScoutSystemPrompt({
       projectRoots: config.project.projectRoots ?? ['.'],
       primaryLanguage: config.project.primaryLanguage ?? '',
@@ -344,9 +388,10 @@ async function emitViaApi(
   try {
     result = await runPlanner({
       root: paths.root,
-      model,
+      runtime: draftRuntime,
       provider: planner.provider,
       modelId,
+      anthropicProviderSpecific,
       systemPrompt,
       userPrompt,
       budget,
@@ -358,7 +403,7 @@ async function emitViaApi(
       stages: {
         scout: {
           enabled: scoutEnabled,
-          model: scoutModelHandle,
+          runtime: scoutRuntime,
           modelId: scoutModelId,
           maxFiles: maxScoutFiles,
           maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
@@ -449,6 +494,10 @@ async function emitViaApi(
         issuesByKind,
         durationMs: result.validation?.durationMs,
       },
+      plannerRuntime: { kind: draftRuntime.kind, provider: planner.provider },
+      providerOptionsSnapshot: anthropicProviderSpecific
+        ? { anthropic: anthropicProviderSpecific }
+        : undefined,
     });
   } catch {
     // best-effort telemetry
@@ -471,9 +520,18 @@ async function emitViaApi(
     { key: 'reads', value: `${snap.reads} files · ${(snap.bytes / 1024).toFixed(1)} KB` },
     {
       key: 'tokens',
-      value: `${snap.usage.inputTokens} in · ${snap.usage.outputTokens} out`,
+      value:
+        `${snap.usage.inputTokens} in · ${snap.usage.outputTokens} out` +
+        (draftRuntime.kind === 'agent-sdk' ? ' (agent-sdk: aggregate-only)' : ''),
     },
-    { key: 'cache', value: formatPlannerCacheLine({ cacheEnabled, stats: result.stats }) },
+    {
+      key: 'cache',
+      value: formatPlannerCacheLine({
+        cacheEnabled,
+        stats: result.stats,
+        plannerRuntimeKind: draftRuntime.kind,
+      }),
+    },
     {
       key: 'max out',
       value: `${planner.maxOutputTokens ?? DEFAULT_PLANNER_MAX_OUTPUT_TOKENS} tok/req`,

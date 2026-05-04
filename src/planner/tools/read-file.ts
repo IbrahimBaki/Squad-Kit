@@ -14,6 +14,46 @@ export const MAX_BYTES_PER_FULL_READ = 32_000;
 export const MAX_LINES_PER_RANGED_READ = 400;
 const MAX_BYTES_FOR_SYNC_LINE_SPLIT = 2_000_000;
 
+export const rangedReadFileSchema = z
+  .object({
+    path: z.string().min(1).describe('Repo-relative POSIX path.'),
+    offset: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe('1-indexed line number to start reading at (use with limit).'),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_LINES_PER_RANGED_READ)
+      .optional()
+      .describe(`Line count from offset (max ${MAX_LINES_PER_RANGED_READ}).`),
+  })
+  .refine(
+    (o) =>
+      (o.offset === undefined && o.limit === undefined) || (o.offset !== undefined && o.limit !== undefined),
+    { message: 'Provide both offset and limit for a ranged read, or neither for a full read.' },
+  );
+
+export const fullReadFileSchema = z.object({
+  path: z.string().min(1).describe('Repo-relative POSIX path.'),
+});
+
+export const READ_FILE_TOOL_DESCRIPTION =
+  'Read a UTF-8 text file from the project, returning its contents so you can plan against real code. ' +
+  'Pass `offset` and `limit` together to read a line range (preferred when you know the region). ' +
+  'Without them the whole file is read, capped at 32 KB. ' +
+  'Paths must be relative to the project root. Binary files are refused. ' +
+  'You have a bounded context budget; prefer small, targeted reads.';
+
+export const READ_FILE_TOOL_DESCRIPTION_WHOLE_ONLY =
+  'Read a UTF-8 text file from the project, returning its contents so you can plan against real code. ' +
+  'Whole-file reads only; capped at 32 KB. ' +
+  'Paths must be relative to the project root. Binary files are refused. ' +
+  'You have a bounded context budget; prefer small, targeted reads.';
+
 export interface ReadFileResult {
   content: string;
   isError: boolean;
@@ -155,43 +195,11 @@ export function readFileToolFactory(
   opts?: ReadFileToolOptions,
 ) {
   const ranged = opts?.ranged ?? true;
-  const params = ranged
-    ? z
-        .object({
-          path: z.string().min(1).describe('Repo-relative POSIX path.'),
-          offset: z
-            .number()
-            .int()
-            .min(1)
-            .optional()
-            .describe('1-indexed line number to start reading at (use with limit).'),
-          limit: z
-            .number()
-            .int()
-            .min(1)
-            .max(MAX_LINES_PER_RANGED_READ)
-            .optional()
-            .describe(`Line count from offset (max ${MAX_LINES_PER_RANGED_READ}).`),
-        })
-        .refine(
-          (o) =>
-            (o.offset === undefined && o.limit === undefined) ||
-            (o.offset !== undefined && o.limit !== undefined),
-          { message: 'Provide both offset and limit for a ranged read, or neither for a full read.' },
-        )
-    : z.object({
-        path: z.string().min(1).describe('Repo-relative POSIX path.'),
-      });
+  const params = ranged ? rangedReadFileSchema : fullReadFileSchema;
+  const description = ranged ? READ_FILE_TOOL_DESCRIPTION : READ_FILE_TOOL_DESCRIPTION_WHOLE_ONLY;
 
   return tool({
-    description:
-      'Read a UTF-8 text file from the project, returning its contents so you can plan against real code. ' +
-      (ranged
-        ? 'Pass `offset` and `limit` together to read a line range (preferred when you know the region). ' +
-          'Without them the whole file is read, capped at 32 KB. '
-        : 'Whole-file reads only; capped at 32 KB. ') +
-      'Paths must be relative to the project root. Binary files are refused. ' +
-      'You have a bounded context budget; prefer small, targeted reads.',
+    description,
     parameters: params,
     execute: async (args: { path: string; offset?: number; limit?: number }, { toolCallId }) => {
       const tc: ToolCall = {

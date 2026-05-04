@@ -13,6 +13,18 @@ const MAX_GREP_FILE_SIZE_BYTES = 1_000_000;
 
 export const GREP_TOOL_NAME = 'grep';
 
+export const grepSchema = z.object({
+  pattern: z.string().min(1).describe('Literal string or regex (default literal).'),
+  regex: z.boolean().optional().default(false),
+  path: z.string().optional().describe('Optional sub-path to scope the search to (relative).'),
+  caseInsensitive: z.boolean().optional().default(false),
+});
+
+export const GREP_TOOL_DESCRIPTION =
+  'Search the project for a literal string or regex pattern. ' +
+  'Returns up to 200 matches across files, each shown as `path:line:match`. ' +
+  'Use this BEFORE `read_file` to locate symbols or call sites; it is much cheaper than reading whole files.';
+
 export interface GrepToolHooks {
   runId: string;
   turn: number;
@@ -22,16 +34,8 @@ export interface GrepToolHooks {
 
 export function grepToolFactory(root: string, budget: Budget, hooks: GrepToolHooks) {
   return tool({
-    description:
-      'Search the project for a literal string or regex pattern. ' +
-      'Returns up to 200 matches across files, each shown as `path:line:match`. ' +
-      'Use this BEFORE `read_file` to locate symbols or call sites; it is much cheaper than reading whole files.',
-    parameters: z.object({
-      pattern: z.string().min(1).describe('Literal string or regex (default literal).'),
-      regex: z.boolean().optional().default(false),
-      path: z.string().optional().describe('Optional sub-path to scope the search to (relative).'),
-      caseInsensitive: z.boolean().optional().default(false),
-    }),
+    description: GREP_TOOL_DESCRIPTION,
+    parameters: grepSchema,
     execute: async (args, { toolCallId }) => {
       const tc: ToolCall = {
         id: toolCallId,
@@ -56,7 +60,7 @@ export function grepToolFactory(root: string, budget: Budget, hooks: GrepToolHoo
   });
 }
 
-function runGrep(
+export function runGrep(
   root: string,
   budget: Budget,
   args: {

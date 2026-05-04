@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { SquadPaths } from '../../core/paths.js';
 import { loadConfig } from '../../core/config.js';
-import { resolveModel } from '../../planner/providers/index.js';
+import { resolveRuntime, extractAnthropicProviderSpecific } from '../../planner/runtimes/index.js';
 import { Budget } from '../../planner/budget.js';
 import { runPlanner } from '../../planner/loop.js';
 import { PlannerEventBus, type PlannerEvent } from '../../planner/events.js';
@@ -101,7 +101,20 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
       const cfgFresh = loadConfig(opts.paths.configFile);
       const planner = cfgFresh.planner!;
       const modelId = modelFor(planner.provider, 'plan', planner.modelOverride);
-      const { model } = resolveModel(planner.provider, modelId, apiKey);
+      const anthropicRuntimeChoice = planner.runtime?.anthropic ?? 'agent-sdk';
+      const draftRuntime = resolveRuntime({
+        provider: planner.provider,
+        modelId,
+        apiKey,
+        anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
+      });
+      const anthropicProviderSpecific =
+        planner.provider === 'anthropic'
+          ? {
+              draft: extractAnthropicProviderSpecific(planner, 'draft'),
+              scout: extractAnthropicProviderSpecific(planner, 'scout'),
+            }
+          : undefined;
       const budget = new Budget(planner.budget);
       const cacheEnabled = planner.cache?.enabled ?? true;
       const scoutEnabled = planner.stages?.scout?.enabled !== false;
@@ -110,7 +123,7 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
       const maxScoutFiles = planner.stages?.scout?.maxFiles ?? 12;
 
       let scoutModelId = '';
-      let scoutModelHandle: ReturnType<typeof resolveModel>['model'] | undefined;
+      let scoutRuntime: ReturnType<typeof resolveRuntime> | undefined;
       let scoutSystemPrompt: string | undefined;
       if (scoutEnabled) {
         scoutModelId = modelFor(
@@ -119,7 +132,12 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
           planner.modelOverride,
           planner.stages?.scout?.modelOverride,
         );
-        scoutModelHandle = resolveModel(planner.provider, scoutModelId, apiKey).model;
+        scoutRuntime = resolveRuntime({
+          provider: planner.provider,
+          modelId: scoutModelId,
+          apiKey,
+          anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
+        });
       }
 
       const repoMap = buildRepoMap(opts.paths.root, { format: 'tree' });
@@ -147,9 +165,10 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
       try {
         result = await runPlanner({
           root: opts.paths.root,
-          model,
+          runtime: draftRuntime,
           provider: planner.provider,
           modelId,
+          anthropicProviderSpecific,
           systemPrompt,
           userPrompt,
           budget,
@@ -161,7 +180,7 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
           stages: {
             scout: {
               enabled: scoutEnabled,
-              model: scoutModelHandle,
+              runtime: scoutRuntime,
               modelId: scoutModelId,
               maxFiles: maxScoutFiles,
               maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
@@ -255,6 +274,10 @@ export function mountRunsApi(app: Hono, opts: { paths: SquadPaths }): void {
             issuesByKind,
             durationMs: result.validation?.durationMs,
           },
+          plannerRuntime: { kind: draftRuntime.kind, provider: planner.provider },
+          providerOptionsSnapshot: anthropicProviderSpecific
+            ? { anthropic: anthropicProviderSpecific }
+            : undefined,
         });
       } catch {
         /* best-effort */

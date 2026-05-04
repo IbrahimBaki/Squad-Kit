@@ -1,7 +1,14 @@
 import type { ToolCall, Usage, PlannerRunStats, ProviderName } from './types.js';
 
 export type PlannerEvent =
-  | { kind: 'started'; runId: string; provider: string; model: string; cacheEnabled: boolean }
+  | {
+      kind: 'started';
+      runId: string;
+      provider: string;
+      model: string;
+      cacheEnabled: boolean;
+      plannerRuntime?: 'vercel' | 'agent-sdk';
+    }
   | { kind: 'turn_started'; runId: string; turn: number }
   | { kind: 'request_sent'; runId: string; turn: number }
   | { kind: 'usage'; runId: string; turn: number; usage: Usage }
