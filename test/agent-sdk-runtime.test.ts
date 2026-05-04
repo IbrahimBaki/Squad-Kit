@@ -115,6 +115,87 @@ describe('AgentSdkRuntime', () => {
     expect(toolExec).not.toHaveBeenCalled();
   });
 
+  it('runDraft emits usage from message_start before final result', async () => {
+    queryMock.mockImplementation(() =>
+      (async function* () {
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'message_start',
+            message: { usage: { input_tokens: 50, output_tokens: 0 } },
+          },
+        };
+        yield textDeltaEvent('## ');
+        yield { type: 'assistant' };
+        yield {
+          type: 'result',
+          subtype: 'success',
+          usage: { input_tokens: 100, output_tokens: 20 },
+        };
+      })(),
+    );
+
+    const bus = new PlannerEventBus();
+    const events: PlannerEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    const rt = new AgentSdkRuntime('claude-opus-4-7', 'sk-secret');
+    await rt.runDraft({
+      systemPrompt: 'sys',
+      userMessage: 'hi',
+      tools: [],
+      bus,
+      runId: 'r1',
+      budget: new Budget(budgetCfg),
+      maxSteps: 8,
+      maxOutputTokens: 4096,
+      providerSpecific: { thinking: 'adaptive', effort: 'medium' },
+    });
+
+    const partial = events.find(
+      (e): e is Extract<PlannerEvent, { kind: 'usage' }> =>
+        e.kind === 'usage' && e.usage.inputTokens === 50 && e.turn === 1,
+    );
+    expect(partial).toBeDefined();
+  });
+
+  it('runDraft emits thinking telemetry for thinking_block_delta', async () => {
+    queryMock.mockImplementation(() =>
+      (async function* () {
+        yield {
+          type: 'stream_event',
+          event: {
+            type: 'content_block_delta',
+            delta: { type: 'thinking_delta', thinking: '`plan`' },
+          },
+        };
+        yield { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } };
+        yield { type: 'assistant' };
+        yield { type: 'result', subtype: 'success', usage: { input_tokens: 1, output_tokens: 1 } };
+      })(),
+    );
+
+    const bus = new PlannerEventBus();
+    const events: PlannerEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    const rt = new AgentSdkRuntime('m', 'k');
+    await rt.runDraft({
+      systemPrompt: 's',
+      userMessage: 'u',
+      tools: [],
+      bus,
+      runId: 'r1',
+      budget: new Budget(budgetCfg),
+      maxSteps: 2,
+      maxOutputTokens: 256,
+    });
+
+    expect(events.some((e) => e.kind === 'thinking_delta')).toBe(true);
+    expect(events.some((e) => e.kind === 'thinking_block_started')).toBe(true);
+    expect(events.some((e) => e.kind === 'thinking_block_stopped')).toBe(true);
+  });
+
   it('runDraft invokes PlannerToolDefinition.execute when SDK tool hook runs', async () => {
     const toolExec = vi.fn(async () => ({ content: 'file-body', isError: false }));
 
@@ -305,6 +386,47 @@ describe('AgentSdkRuntime', () => {
     expect(out.finishedNormally).toBe(false);
   });
 
+  it('runScout emits assistant_text before scout result is captured', async () => {
+    queryMock.mockImplementation(() => {
+      const scoutEntry = [...createSdkMcpServerMock.mock.calls].find((c) => c[0].name === 'squad-kit-scout');
+      const scoutTools = scoutEntry?.[0].tools as Array<{ exec: (a: unknown) => Promise<unknown> }>;
+      return (async function* () {
+        yield {
+          type: 'stream_event',
+          event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Scout reasoning… ' } },
+        };
+        if (scoutTools?.[0]) {
+          await scoutTools[0].exec({
+            selectedFiles: ['./a.md'],
+            reasoning: 'need a',
+            suggestedReadStrategy: 'read_full',
+          });
+        }
+        yield { type: 'result', subtype: 'success', usage: { input_tokens: 30, output_tokens: 10 } };
+      })();
+    });
+
+    const bus = new PlannerEventBus();
+    const texts: string[] = [];
+    bus.subscribe((e) => {
+      if (e.kind === 'assistant_text' && e.delta) texts.push(e.delta);
+    });
+
+    const rt = new AgentSdkRuntime('m', 'k');
+    const out = await rt.runScout({
+      systemPrompt: 'sys',
+      userMessage: 'pick files',
+      schema: ScoutOutputSchema,
+      bus,
+      runId: 'r-scout',
+      maxOutputTokens: 1024,
+      providerSpecific: { effort: 'minimal' },
+    });
+
+    expect(out).not.toBeNull();
+    expect(texts.some((t) => t.includes('Scout reasoning'))).toBe(true);
+  });
+
   it('runScout returns parsed output when respond tool runs with valid args', async () => {
     queryMock.mockImplementation(() => {
       const scoutEntry = [...createSdkMcpServerMock.mock.calls].find((c) => c[0].name === 'squad-kit-scout');
@@ -406,5 +528,6 @@ describe('AgentSdkRuntime', () => {
     expect(opts.tools).toEqual([]);
     expect(opts.persistSession).toBe(false);
     expect(opts.settingSources).toEqual([]);
+    expect(opts.includePartialMessages).toBe(true);
   });
 });

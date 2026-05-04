@@ -10,6 +10,8 @@ import { newRunId } from '../core/runs.js';
 import { DEFAULT_PLANNER_MAX_ITERATIONS, type PlannerLimitDecision, type PlannerSessionLimitContext } from './session-limits.js';
 import { VercelRuntime } from './runtimes/vercel-runtime.js';
 import type { AnthropicProviderSpecific, PlannerRuntime } from './runtimes/types.js';
+import type { SquadPaths } from '../core/paths.js';
+import { createRunEventsStore, rotateRunEvents } from '../core/run-events-store.js';
 import { PlannerEventBus } from './events.js';
 import { runScout } from './stages/scout.js';
 import { validatePlan, type ValidationIssue } from './validation.js';
@@ -50,6 +52,10 @@ export interface RunPlannerInput {
   toolsEnabled?: { grep?: boolean; listDir?: boolean; rangedRead?: boolean };
   scoutSystemPrompt?: string;
   scoutedSection?: string;
+  /** When set and {@link persistEvents} is not `false`, planner events are mirrored to `.squad/runs/<runId>.events.jsonl`. */
+  paths?: SquadPaths;
+  /** Persist run events unless `false`. Defaults to enabling persistence when {@link paths} is set. */
+  persistEvents?: boolean;
 }
 
 /** Why the loop stopped when `finishedNormally` is false (non-error, non-budget, non-timeout). */
@@ -303,6 +309,20 @@ async function runDraftStage(input: RunPlannerInput): Promise<DraftStageOutput> 
 
   const incompleteKind = draft.incompleteKind as DraftStageOutput['incompleteKind'] | undefined;
 
+  const u = input.budget.snapshot().usage;
+  const cacheRead = u.cacheReadTokens ?? 0;
+  const cacheCreate = u.cacheCreationTokens ?? 0;
+  const totalIn = u.inputTokens + cacheRead;
+  const cacheHitRatio = totalIn === 0 ? 0 : Math.round((cacheRead / totalIn) * 100) / 100;
+  bus.emit({
+    kind: 'cache_summary',
+    runId,
+    turn: draft.iterations,
+    cacheHitRatio,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheCreate,
+  });
+
   return {
     planText: draft.text,
     budgetExhausted: draft.budgetExhausted ?? budgetExhausted,
@@ -319,6 +339,29 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
   const bus = input.events ?? new PlannerEventBus();
   const runId = input.runId ?? newRunId();
   const cacheEnabled = input.cacheEnabled ?? true;
+
+  const shouldPersistEvents =
+    input.persistEvents !== false && input.paths !== undefined;
+  if (input.persistEvents === true && !input.paths) {
+    throw new Error('runPlanner: `paths` is required when `persistEvents: true`');
+  }
+  let persistFinalized = false;
+  if (shouldPersistEvents && input.paths) {
+    const persistPaths = input.paths;
+    const store = createRunEventsStore(persistPaths, runId);
+    const unsubPersist = bus.subscribe((e) => {
+      void store.append(e);
+    });
+    bus.finalizeEventPersistence = async () => {
+      if (persistFinalized) return;
+      persistFinalized = true;
+      unsubPersist();
+      await store.close();
+      delete bus.finalizeEventPersistence;
+      await rotateRunEvents(persistPaths);
+    };
+  }
+
   bus.emit({
     kind: 'started',
     runId,
@@ -326,6 +369,31 @@ export async function runPlanner(input: RunPlannerInput): Promise<RunPlannerOutp
     model: input.modelId,
     cacheEnabled,
     plannerRuntime: input.runtime.kind,
+  });
+
+  bus.emit({
+    kind: 'runtime_info',
+    runId,
+    provider: input.provider,
+    model: input.modelId,
+    runtimeKind: input.runtime.kind,
+    cacheEnabled,
+    scoutEnabled: input.stages?.scout?.enabled !== false,
+    validationEnabled: input.validation?.enabled !== false,
+    budgetCaps: input.budget.caps(),
+    providerOptions:
+      input.provider === 'anthropic' && input.anthropicProviderSpecific
+        ? {
+            anthropic: {
+              thinking: input.anthropicProviderSpecific.draft?.thinking ?? 'adaptive',
+              effort: input.anthropicProviderSpecific.draft?.effort,
+              effortByPhase: {
+                scout: input.anthropicProviderSpecific.scout?.effort,
+                draft: input.anthropicProviderSpecific.draft?.effort,
+              },
+            },
+          }
+        : undefined,
   });
 
   const merged: RunPlannerInput = { ...input, events: bus, runId };

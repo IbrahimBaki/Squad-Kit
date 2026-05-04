@@ -52,6 +52,31 @@ function queueStreamModel(rounds: LanguageModelV1StreamPart[][]) {
 }
 
 describe('runPlanner', () => {
+  it('emits runtime_info right after started', async () => {
+    const model = queueStreamModel([
+      [
+        { type: 'text-delta', textDelta: '# plan\n' },
+        { type: 'finish', finishReason: 'stop', usage: tok(1, 1) },
+      ],
+    ]);
+    const bus = new PlannerEventBus();
+    const events: PlannerEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    await runPlanner({
+      root: os.tmpdir(),
+      runtime: vercelTestRuntime(model),
+      provider: 'anthropic',
+      modelId: 'm',
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      budget: new Budget(budgetCfg),
+      events: bus,
+    });
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    expect(events[0]?.kind).toBe('started');
+    expect(events[1]?.kind).toBe('runtime_info');
+  });
+
   it('returns planText and finishedNormally when assistant ends with end_turn and no tool calls', async () => {
     const model = queueStreamModel([
       [

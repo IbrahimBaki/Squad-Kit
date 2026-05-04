@@ -72,6 +72,56 @@ export type PlannerEvent =
       reasoning: string;
     }
   | {
+      kind: 'runtime_info';
+      runId: string;
+      provider: ProviderName;
+      model: string;
+      runtimeKind: 'vercel' | 'agent-sdk';
+      cacheEnabled: boolean;
+      scoutEnabled: boolean;
+      validationEnabled: boolean;
+      budgetCaps: { maxFileReads: number; maxContextBytes: number; maxDurationSeconds: number };
+      /** Anthropic-only; absent for OpenAI/Google. */
+      providerOptions?: {
+        anthropic?: {
+          thinking?: 'adaptive' | 'enabled' | 'disabled' | 'off';
+          effort?: 'minimal' | 'medium' | 'high';
+          effortByPhase?: { scout?: 'minimal' | 'medium' | 'high'; draft?: 'minimal' | 'medium' | 'high' };
+        };
+      };
+    }
+  | { kind: 'tool_call_started'; runId: string; turn: number; toolCallId: string; name: string; input: Record<string, unknown> }
+  | {
+      kind: 'tool_call_completed';
+      runId: string;
+      turn: number;
+      toolCallId: string;
+      name: string;
+      durationMs: number;
+      bytesLoaded: number;
+      totalBytes: number;
+      isError: boolean;
+      /** First 200 chars of error message when isError. */
+      errorSnippet?: string;
+    }
+  | {
+      kind: 'thinking_delta';
+      runId: string;
+      turn: number;
+      /** Index of the thinking block within this turn (resets per turn). */
+      blockIndex: number;
+      delta: string;
+    }
+  | { kind: 'thinking_block_started'; runId: string; turn: number; blockIndex: number }
+  | {
+      kind: 'thinking_block_stopped';
+      runId: string;
+      turn: number;
+      blockIndex: number;
+      durationMs: number;
+      chars: number;
+    }
+  | {
       kind: 'validation_issue';
       runId: string;
       severity: 'warning' | 'error';
@@ -84,6 +134,12 @@ export type PlannerEvent =
 export type PlannerEventListener = (e: PlannerEvent) => void;
 
 export class PlannerEventBus {
+  /**
+   * When `runPlanner` persists JSONL timelines, callers must await this once after emitting
+   * terminal bus events (`done`) so streams flush before process exit.
+   */
+  finalizeEventPersistence?: () => Promise<void>;
+
   private listeners = new Set<PlannerEventListener>();
   emit(e: PlannerEvent): void {
     for (const fn of this.listeners) {

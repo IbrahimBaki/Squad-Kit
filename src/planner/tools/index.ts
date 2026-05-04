@@ -53,42 +53,86 @@ export function buildPlannerToolDefinitions(opts: PlannerToolDefinitionsOpts): P
     parameters: readParams,
     execute: async (args) => {
       const turn = opts.getTurn();
+      const toolCallId = randomUUID();
+      const startedAtMs = Date.now();
       const tc: ToolCall = {
-        id: randomUUID(),
+        id: toolCallId,
         name: 'read_file',
         input: { path: args.path, offset: (args as { offset?: number }).offset, limit: (args as { limit?: number }).limit },
       };
-      const before = opts.budget.snapshot().bytes;
-      let result = readFileTool(opts.root, opts.budget, args as { path?: unknown; offset?: unknown; limit?: unknown });
-      let after = opts.budget.snapshot().bytes;
-      let bytesLoaded = after - before;
-      opts.onToolCall?.(tc, bytesLoaded, after);
+
       opts.bus.emit({
-        kind: 'tool_call',
+        kind: 'tool_call_started',
         runId: opts.runId,
         turn,
-        toolCall: tc,
-        bytesLoaded,
-        totalBytes: after,
+        toolCallId,
+        name: 'read_file',
+        input: tc.input,
       });
 
-      if (readBudgetishError(result)) {
-        const decide = opts.decideOnLimit;
-        if (decide) {
-          const d = await decide(opts.getLimitCtx());
-          if (d === 'cancel') {
-            throw new PlannerUserCancelledError(opts.getAccumulatedText(), opts.runId, turn, 'budget_reads', tc, result);
-          }
-          opts.extendSessionLimits();
-          result = readFileTool(opts.root, opts.budget, args as { path?: unknown; offset?: unknown; limit?: unknown });
-          after = opts.budget.snapshot().bytes;
-          bytesLoaded = after - before;
-        } else {
-          opts.setBudgetExhausted(true);
-        }
-      }
+      try {
+        const before = opts.budget.snapshot().bytes;
+        let result = readFileTool(opts.root, opts.budget, args as { path?: unknown; offset?: unknown; limit?: unknown });
+        let after = opts.budget.snapshot().bytes;
+        let bytesLoaded = after - before;
 
-      return { content: result.content, isError: result.isError };
+        if (readBudgetishError(result)) {
+          const decide = opts.decideOnLimit;
+          if (decide) {
+            const d = await decide(opts.getLimitCtx());
+            if (d === 'cancel') {
+              throw new PlannerUserCancelledError(opts.getAccumulatedText(), opts.runId, turn, 'budget_reads', tc, result);
+            }
+            opts.extendSessionLimits();
+            result = readFileTool(opts.root, opts.budget, args as { path?: unknown; offset?: unknown; limit?: unknown });
+            after = opts.budget.snapshot().bytes;
+            bytesLoaded = after - before;
+          } else {
+            opts.setBudgetExhausted(true);
+          }
+        }
+
+        opts.onToolCall?.(tc, bytesLoaded, after);
+        opts.bus.emit({
+          kind: 'tool_call',
+          runId: opts.runId,
+          turn,
+          toolCall: tc,
+          bytesLoaded,
+          totalBytes: after,
+        });
+
+        const durationMs = Date.now() - startedAtMs;
+        opts.bus.emit({
+          kind: 'tool_call_completed',
+          runId: opts.runId,
+          turn,
+          toolCallId,
+          name: 'read_file',
+          durationMs,
+          bytesLoaded,
+          totalBytes: after,
+          isError: !!result.isError,
+          errorSnippet: result.isError ? String(result.content).slice(0, 200) : undefined,
+        });
+
+        return { content: result.content, isError: result.isError };
+      } catch (err) {
+        const durationMs = Date.now() - startedAtMs;
+        opts.bus.emit({
+          kind: 'tool_call_completed',
+          runId: opts.runId,
+          turn,
+          toolCallId,
+          name: 'read_file',
+          durationMs,
+          bytesLoaded: 0,
+          totalBytes: opts.budget.snapshot().bytes,
+          isError: true,
+          errorSnippet: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+        });
+        throw err;
+      }
     },
   });
 
@@ -99,30 +143,74 @@ export function buildPlannerToolDefinitions(opts: PlannerToolDefinitionsOpts): P
       parameters: grepSchema,
       execute: async (args) => {
         const turn = opts.getTurn();
+        const toolCallId = randomUUID();
+        const startedAtMs = Date.now();
         const tc: ToolCall = {
-          id: randomUUID(),
+          id: toolCallId,
           name: GREP_TOOL_NAME,
           input: { ...args },
         };
-        const before = opts.budget.snapshot().bytes;
-        const out = runGrep(opts.root, opts.budget, {
-          pattern: args.pattern,
-          regex: args.regex ?? false,
-          path: args.path,
-          caseInsensitive: args.caseInsensitive ?? false,
-        });
-        const after = opts.budget.snapshot().bytes;
-        const bytesLoaded = after - before;
-        opts.onToolCall?.(tc, bytesLoaded, after);
+
         opts.bus.emit({
-          kind: 'tool_call',
+          kind: 'tool_call_started',
           runId: opts.runId,
           turn,
-          toolCall: tc,
-          bytesLoaded,
-          totalBytes: after,
+          toolCallId,
+          name: GREP_TOOL_NAME,
+          input: tc.input,
         });
-        return { content: out.content, isError: out.isError };
+
+        try {
+          const before = opts.budget.snapshot().bytes;
+          const out = runGrep(opts.root, opts.budget, {
+            pattern: args.pattern,
+            regex: args.regex ?? false,
+            path: args.path,
+            caseInsensitive: args.caseInsensitive ?? false,
+          });
+          const after = opts.budget.snapshot().bytes;
+          const bytesLoaded = after - before;
+          opts.onToolCall?.(tc, bytesLoaded, after);
+          opts.bus.emit({
+            kind: 'tool_call',
+            runId: opts.runId,
+            turn,
+            toolCall: tc,
+            bytesLoaded,
+            totalBytes: after,
+          });
+
+          const durationMs = Date.now() - startedAtMs;
+          opts.bus.emit({
+            kind: 'tool_call_completed',
+            runId: opts.runId,
+            turn,
+            toolCallId,
+            name: GREP_TOOL_NAME,
+            durationMs,
+            bytesLoaded,
+            totalBytes: after,
+            isError: !!out.isError,
+            errorSnippet: out.isError ? String(out.content).slice(0, 200) : undefined,
+          });
+
+          return { content: out.content, isError: out.isError };
+        } catch (err) {
+          const durationMs = Date.now() - startedAtMs;
+          opts.bus.emit({
+            kind: 'tool_call_completed',
+            runId: opts.runId,
+            turn,
+            toolCallId,
+            name: GREP_TOOL_NAME,
+            durationMs,
+            bytesLoaded: 0,
+            totalBytes: opts.budget.snapshot().bytes,
+            isError: true,
+            errorSnippet: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+          });
+          throw err;
+        }
       },
     });
   }
@@ -134,24 +222,69 @@ export function buildPlannerToolDefinitions(opts: PlannerToolDefinitionsOpts): P
       parameters: listDirSchema,
       execute: async (args) => {
         const turn = opts.getTurn();
+        const toolCallId = randomUUID();
+        const startedAtMs = Date.now();
         const tc: ToolCall = {
-          id: randomUUID(),
+          id: toolCallId,
           name: LIST_DIR_TOOL_NAME,
           input: { path: args.path },
         };
-        const before = opts.budget.snapshot().bytes;
-        const out = runListDir(opts.root, opts.budget, args.path);
-        const after = opts.budget.snapshot().bytes;
-        opts.onToolCall?.(tc, after - before, after);
+
         opts.bus.emit({
-          kind: 'tool_call',
+          kind: 'tool_call_started',
           runId: opts.runId,
           turn,
-          toolCall: tc,
-          bytesLoaded: after - before,
-          totalBytes: after,
+          toolCallId,
+          name: LIST_DIR_TOOL_NAME,
+          input: tc.input,
         });
-        return { content: out.content, isError: out.isError };
+
+        try {
+          const before = opts.budget.snapshot().bytes;
+          const out = runListDir(opts.root, opts.budget, args.path);
+          const after = opts.budget.snapshot().bytes;
+          const bytesLoaded = after - before;
+          opts.onToolCall?.(tc, bytesLoaded, after);
+          opts.bus.emit({
+            kind: 'tool_call',
+            runId: opts.runId,
+            turn,
+            toolCall: tc,
+            bytesLoaded,
+            totalBytes: after,
+          });
+
+          const durationMs = Date.now() - startedAtMs;
+          opts.bus.emit({
+            kind: 'tool_call_completed',
+            runId: opts.runId,
+            turn,
+            toolCallId,
+            name: LIST_DIR_TOOL_NAME,
+            durationMs,
+            bytesLoaded,
+            totalBytes: after,
+            isError: !!out.isError,
+            errorSnippet: out.isError ? String(out.content).slice(0, 200) : undefined,
+          });
+
+          return { content: out.content, isError: out.isError };
+        } catch (err) {
+          const durationMs = Date.now() - startedAtMs;
+          opts.bus.emit({
+            kind: 'tool_call_completed',
+            runId: opts.runId,
+            turn,
+            toolCallId,
+            name: LIST_DIR_TOOL_NAME,
+            durationMs,
+            bytesLoaded: 0,
+            totalBytes: opts.budget.snapshot().bytes,
+            isError: true,
+            errorSnippet: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+          });
+          throw err;
+        }
       },
     });
   }

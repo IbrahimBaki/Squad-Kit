@@ -5,6 +5,8 @@ import type { PlannerRunStats } from '../planner/types.js';
 import type { ProviderName } from '../planner/types.js';
 import type { AnthropicProviderSpecific } from '../planner/runtimes/types.js';
 import type { SquadPaths } from './paths.js';
+import { RUN_HISTORY_RING_SIZE } from './run-retention.js';
+import { rotateRunEvents } from './run-events-store.js';
 
 export interface RunRecord {
   runId: string;
@@ -38,12 +40,27 @@ export interface RunRecord {
   };
 }
 
-const RING_SIZE = 20;
-
 export function newRunId(): string {
   const ts = Date.now().toString(36).padStart(9, '0');
   const rnd = randomBytes(8).toString('hex');
   return `${ts}-${rnd}`;
+}
+
+async function pruneOldRuns(paths: SquadPaths): Promise<void> {
+  const dir = path.join(paths.squadDir, 'runs');
+  const entries = (await fs.readdir(dir)).filter((n) => n.endsWith('.json'));
+  if (entries.length <= RUN_HISTORY_RING_SIZE) return;
+  entries.sort();
+  const drop = entries.slice(0, entries.length - RUN_HISTORY_RING_SIZE);
+  await Promise.all(
+    drop.map(async (n) => {
+      const runPath = path.join(dir, n);
+      const runId = n.replace(/\.json$/u, '');
+      await fs.rm(runPath, { force: true });
+      await fs.rm(path.join(dir, `${runId}.events.jsonl`), { force: true });
+      await fs.rm(path.join(dir, `${runId}.events.jsonl.gz`), { force: true });
+    }),
+  );
 }
 
 export async function appendRun(paths: SquadPaths, rec: Omit<RunRecord, 'version'>): Promise<void> {
@@ -51,15 +68,8 @@ export async function appendRun(paths: SquadPaths, rec: Omit<RunRecord, 'version
   await fs.mkdir(dir, { recursive: true });
   const file = path.join(dir, `${rec.runId}.json`);
   await fs.writeFile(file, JSON.stringify({ ...rec, version: 1 }, null, 2) + '\n', 'utf8');
-  await pruneOldRuns(dir);
-}
-
-async function pruneOldRuns(dir: string): Promise<void> {
-  const entries = (await fs.readdir(dir)).filter((n) => n.endsWith('.json'));
-  if (entries.length <= RING_SIZE) return;
-  entries.sort();
-  const drop = entries.slice(0, entries.length - RING_SIZE);
-  await Promise.all(drop.map((n) => fs.rm(path.join(dir, n), { force: true })));
+  await pruneOldRuns(paths);
+  await rotateRunEvents(paths);
 }
 
 export async function listRuns(paths: SquadPaths): Promise<RunRecord[]> {

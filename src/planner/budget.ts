@@ -57,6 +57,14 @@ export class Budget {
     return (Date.now() - this.startedAt) / 1000 > this.maxWallSeconds;
   }
 
+  caps(): { maxFileReads: number; maxContextBytes: number; maxDurationSeconds: number } {
+    return {
+      maxFileReads: this.maxFileReadsAllowed,
+      maxContextBytes: this.maxContextBytesAllowed,
+      maxDurationSeconds: this.maxWallSeconds,
+    };
+  }
+
   snapshot() {
     return {
       reads: this.reads,
