@@ -137,7 +137,7 @@ Use the real path to your `intake.md`. The agent runs the bundled meta-prompt, r
 
 ### Option B — direct from the terminal (`0.2.0`)
 
-With the direct planner enabled and credentials set:
+With the direct planner enabled and credentials set, the live terminal session mirrors the console-style activity feed: **stage pipeline** (scout → draft → validation), **budget meters** (reads, context KB, wall time), **extended thinking** (when the model supports it), **streaming validation findings**, and a final summary that includes **runtime** metadata plus the path to the persisted **`.events.jsonl`** timeline under `.squad/runs/` (when event persistence is enabled).
 
 ```bash
 squad new-plan --api

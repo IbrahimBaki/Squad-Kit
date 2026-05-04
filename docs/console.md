@@ -75,6 +75,21 @@ Pick a story and start an API planning run. The UI subscribes to **SSE** and sho
 
 The top bar lists **recent project roots** from `~/.squad/recent-projects.json`. Each console process serves **one** workspace. Opening another project in the same tab is not supported; choose a recent root and the UI copies `cd <that-root> && squad console` so you can run it in a second terminal. Full multi-server federation is out of scope for v1.
 
+## Run history on disk
+
+Every API run writes a summary JSON and an event log JSONL under `.squad/runs/`:
+
+- `.squad/runs/<runId>.json` — final stats, model, durations, validation summary.
+- `.squad/runs/<runId>.events.jsonl` — full timeline (tool calls, usage, scout, validation).
+
+The 5 newest event logs stay uncompressed; the next 15 are gzipped to `<runId>.events.jsonl.gz`. Logs older than 20 runs are dropped. **Thinking text is redacted on disk** (block count and duration are kept); the live console stream still shows full thinking content.
+
+## Browsing runs
+
+- `/runs` lists the last 20 runs with model, runtime, duration, token totals, cache hit %, validation count, and outcome.
+- `/runs/<runId>` re-renders a finished run with the same activity feed, stage pipeline, and tabs as the live Generate page. Thinking content is replayed as a “block summary only” chip (live runs show full thinking text; disk redaction is intentional).
+- Runs older than the 20-record retention are gone from the UI; the underlying disk policy keeps the 5 newest events JSONL uncompressed and gzips the next 15 (see “Run history on disk” above).
+
 ## Development setup
 
 For Vite hot reload against a running `squad console`, see [`console-ui/README.md`](../console-ui/README.md).
