@@ -7,42 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-04
+
 ### What's new
 
-- **Planner polish:** Tool results preserve **`toolName`** and **`isError`** across turns (fixes OpenAI/Google fidelity); **scout** honours **`readRanges`**, caps output via **`planner.stages.scout.maxOutputTokens`** (default **2048**), retries once on **429** within **90s**, sees a **plans index** under `.squad/plans/`, and surfaces **`stage_complete.errorMessage`** on failure. **Scouted file previews** live in a dedicated cached **user** message so the **system** prompt stays stable across runs (better prompt-cache hits). Validator suggests **did you mean** for paths/symbols, validates single-line citations, and caches file reads per pass. **`RunRecord.validation.issuesByKind`** records issue breakdown for telemetry.
+- Scout precedes the draft planner in API `new-plan` for a cheaper first pass.
+- Validation verifies citations offline and suggests typo fixes for paths.
+- New planner tools: `grep`, `list_dir`, and `read_file` with offset/limit.
+- Scout sees a bullet list of `.squad/plans/` markdown (caps at ~30 files).
+- Anthropic/OpenAI/Google run through Vercel AI SDK (`ai`, `@ai-sdk/*`).
+- Tool outputs keep `toolName`/`isError` metadata across turns where supported.
+- Scout snippets use separate user-role cache blocks for stabler prompts.
+- Generate-plan template adds edge-case, failure-mode, and test-plan sections.
+- Disable scout or validation via flags or YAML (`planner.stages.*`).
 
 ### Bug fixes
 
-- Console Tracker page (`/tracker`) failed to load issues with `Jira search failed (HTTP 400).`
-  on first mount. Atlassian's `/rest/api/3/search/jql` rejects unbounded JQL; squad-kit's
-  empty-query path was sending `order by updated DESC` with no predicate. Bounded to
-  `updated >= -90d ORDER BY updated DESC` so recently-updated issues populate as expected.
-- Non-2xx Jira responses now include Atlassian's `errorMessages` in `TrackerError.message`
-  (capped at 200 chars), so the console UI surfaces an actionable reason instead of the bare
-  status code. Auth (401/403) and rate-limit (429) keep their existing recovery hints.
+- Jira Tracker broke on blank search (HTTP 400); bounded JQL restores results.
+- Atlassian JSON errors surface in tracker messages again (snippet capped).
 
-### Removed
+### Breaking changes
 
-- **`planner.budget.maxCostUsd`** (and the **`cost_cap`** session-limit branch). The field was never enforced because squad-kit did not maintain a per-provider price table. Cost tracking may return as a real implementation in a later story.
-
-- **Smarter `squad new-plan --api`.** A new **scout** stage (cheap-tier model) pre-selects
-  relevant files for the planner before the **draft** stage (your configured plan model)
-  writes the plan; an LLM-free **validation** pass then checks cited paths, line ranges,
-  and symbols against the repo and surfaces issues. New tool surface: `grep`, `list_dir`, and
-  ranged `read_file` (offset/limit). The meta-prompt mandates verification before
-  every claim and adds **`## Edge Cases & Failure Modes`** and **`## Test Plan`** sections.
-  Disable with `--no-scout` / `--no-validation` or `planner.stages.scout.enabled: false`
-  / `planner.validation.enabled: false`.
-
-### Internal
-
-- Per-tool budgets: `grep` and `list_dir` count against the read-count budget and charge
-  result-string bytes. Whole-file `read_file` retains the 32 KB cap.
-- New planner events (`stage_started`, `stage_complete`, `scout_result`, `validation_issue`).
-  Console UI subscribes to these SSE event names but does not change layout yet.
-- `PLANNER_MODEL_MAP` adds a `scout` phase per provider; `pnpm verify:models` checks it when keys are set.
-- Lightweight eval harness at `test/eval/` (`pnpm eval:offline` is free; `pnpm eval` gated
-  behind `SQUAD_INTEGRATION_TEST=1`).
+- Dropped `planner.budget.maxCostUsd` and `cost_cap` limits (never enforced).
+- Remove lingering keys from `config.yaml` if they are still declared.
 
 ## [0.8.0] — 2026-05-03
 
