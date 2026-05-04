@@ -29,6 +29,7 @@ import { formatPlannerCacheLine } from '../ui/planner-cache-summary.js';
 import { PlannerEventBus } from '../planner/events.js';
 import { buildPlansIndex } from '../core/plans-index.js';
 import { summariseIssuesByKind } from '../planner/validation.js';
+import { dispatchNewPlanApiPlannerEvent, type NewPlanApiUiDispatchContext } from './new-plan-api-events.js';
 
 export interface NewPlanOptions {
   /** Override `planner.runtime.anthropic` for this run (`agent-sdk` default). */
@@ -242,15 +243,6 @@ async function emitViaApi(
   ui.step(`planning   ${story.feature} / ${story.id}`);
   ui.kv('provider', planner.provider);
   ui.kv('model', modelId);
-  ui.kv(
-    'runtime',
-    `${draftRuntime.kind} · ${draftRuntime.providerName}` +
-      (planner.provider === 'anthropic' ? ` (${anthropicRuntimeChoice})` : ''),
-  );
-  ui.kv(
-    'budget',
-    `${planner.budget.maxFileReads} reads · ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB · ${planner.budget.maxDurationSeconds}s`,
-  );
   ui.blank();
 
   const interactive = !opts.yes && Boolean(process.stdin.isTTY);
@@ -309,64 +301,29 @@ async function emitViaApi(
   const cacheEnabled = planner.cache?.enabled ?? true;
   const runId = newRunId();
   const bus = new PlannerEventBus();
+
+  const apiUiCtx: NewPlanApiUiDispatchContext = {
+    sessionSpinner,
+    stageLine: { scout: 'pending', draft: 'pending', validation: 'pending' },
+    activePlannerStage: null,
+    thinkingBlockChars: 0,
+    thinkingState: { running: false, blockStartedAt: 0, totalChars: 0, totalDurationMs: 0 },
+    thinkingSpinner: { current: null },
+    thinkingTick: { id: null },
+    budget,
+    budgetCaps: null,
+    startedAt,
+    interactive,
+    stagesIntroPrinted: false,
+    lastToolUi: null,
+    streamedValidationIssues: { count: 0 },
+    validationStreamCappedMsg: false,
+    anthropicRuntimeChoice: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
+    usageAcc: { inputTokens: 0, outputTokens: 0 },
+  };
+
   const unsubscribe = bus.subscribe((e) => {
-    switch (e.kind) {
-      case 'tool_call': {
-        const name = e.toolCall.name;
-        const inp = e.toolCall.input as Record<string, unknown>;
-        let label: string;
-        if (name === 'read_file') {
-          label = `read ${String(inp.path ?? '<unknown>')}`;
-        } else if (name === 'grep') {
-          label = `grep ${String(inp.pattern ?? '?').slice(0, 48)}`;
-        } else if (name === 'list_dir') {
-          label = `list_dir ${String(inp.path ?? '?')}`;
-        } else {
-          label = name;
-        }
-        sessionSpinner.current?.succeed(
-          `${label}  (${(e.bytesLoaded / 1024).toFixed(1)} KB · ${(e.totalBytes / 1024).toFixed(1)} KB / ${(planner.budget.maxContextBytes / 1024).toFixed(0)} KB)`,
-        );
-        sessionSpinner.current = ui.spinner('next tool…');
-        break;
-      }
-      case 'stage_started': {
-        sessionSpinner.current?.stop();
-        if (e.stage === 'scout') sessionSpinner.current = ui.spinner('scouting…');
-        else if (e.stage === 'draft') sessionSpinner.current = ui.spinner('drafting…');
-        else if (e.stage === 'validation') sessionSpinner.current = ui.spinner('validating…');
-        break;
-      }
-      case 'stage_complete': {
-        if (!e.success && e.errorMessage && e.stage === 'scout') {
-          sessionSpinner.current?.stop();
-          ui.warning(`scout stage failed: ${e.errorMessage}`);
-        }
-        break;
-      }
-      case 'scout_result': {
-        const preview = e.selected.slice(0, 4).join(', ');
-        const more = e.selected.length > 4 ? '…' : '';
-        sessionSpinner.current?.succeed(`scout picked ${e.selected.length} files: ${preview}${more}`);
-        sessionSpinner.current = ui.spinner('drafting…');
-        break;
-      }
-      case 'assistant_text':
-        sessionSpinner.current?.succeed('planner thinking complete (this chunk)');
-        sessionSpinner.current = ui.spinner('thinking…');
-        break;
-      case 'rate_limit':
-        if (e.phase === 'retrying') {
-          sessionSpinner.current?.stop();
-          ui.warning(`${e.provider} rate limit hit — retrying in ${e.waitSec}s`);
-          sessionSpinner.current = ui.spinner('waiting for rate limit to reset…');
-        }
-        break;
-      case 'usage':
-        break;
-      default:
-        break;
-    }
+    dispatchNewPlanApiPlannerEvent(apiUiCtx, e);
   });
 
   const decideOnLimit = interactive
@@ -400,6 +357,7 @@ async function emitViaApi(
       decideOnLimit,
       events: bus,
       runId,
+      paths,
       stages: {
         scout: {
           enabled: scoutEnabled,
@@ -414,7 +372,13 @@ async function emitViaApi(
       scoutSystemPrompt,
     });
   } finally {
+    await bus.finalizeEventPersistence?.();
     unsubscribe();
+    if (apiUiCtx.thinkingTick.id) {
+      clearInterval(apiUiCtx.thinkingTick.id);
+      apiUiCtx.thinkingTick.id = null;
+    }
+    apiUiCtx.thinkingSpinner.current?.stop();
     sessionSpinner.current?.stop();
   }
 
@@ -502,11 +466,32 @@ async function emitViaApi(
   } catch {
     // best-effort telemetry
   }
+
+  const stripAnsi = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '');
+  const budgetCapsForSummary = budget.caps();
+
   ui.blank();
   ui.summaryBox(success ? ' plan generated ' : ' plan saved (incomplete) ', [
     { key: 'file', value: relPlan },
     { key: 'nn', value: String(sequenceNumber).padStart(2, '0') },
     { key: 'model', value: `${planner.provider}/${modelId}` },
+    {
+      key: 'runtime',
+      value: (() => {
+        let chips = '';
+        if (planner.provider === 'anthropic') {
+          const d = anthropicProviderSpecific?.draft;
+          if (d?.effort) chips += ` · effort ${d.effort}`;
+          if (d?.thinking && d.thinking !== 'off') chips += ` · thinking ${d.thinking}`;
+        }
+        const rollup =
+          apiUiCtx.thinkingState.totalChars > 0
+            ? ` · Σ ${apiUiCtx.thinkingState.totalChars} thinking chars`
+            : '';
+        return `${draftRuntime.kind} · ${planner.provider}${chips}${rollup}`;
+      })(),
+    },
+    { key: 'events', value: `.squad/runs/${runId}.events.jsonl` },
     {
       key: 'scout',
       value: scoutEnabled
@@ -517,7 +502,19 @@ async function emitViaApi(
       key: 'validation',
       value: validationEnabled ? `${issueCount} issue(s)` : 'disabled',
     },
-    { key: 'reads', value: `${snap.reads} files · ${(snap.bytes / 1024).toFixed(1)} KB` },
+    {
+      key: 'reads',
+      value: stripAnsi(
+        ui.formatBudgetMeter({
+          reads: snap.reads,
+          readsCap: budgetCapsForSummary.maxFileReads,
+          bytes: snap.bytes,
+          bytesCap: budgetCapsForSummary.maxContextBytes,
+          elapsedMs,
+          durationMsCap: budgetCapsForSummary.maxDurationSeconds * 1000,
+        }),
+      ),
+    },
     {
       key: 'tokens',
       value:
@@ -551,14 +548,19 @@ async function emitViaApi(
 
   if (issueCount > 0 && validationEnabled) {
     ui.blank();
-    ui.warning(`Validation reported ${issueCount} issue(s) (heuristic; first 10 shown):`);
-    for (const iss of result.validation!.issues.slice(0, 10)) {
-      ui.info(
-        `  [${iss.severity}] ${iss.kind}${iss.path ? ` ${iss.path}` : ''} — ${iss.detail}`,
-      );
-    }
-    if (issueCount > 10) {
-      ui.info(`  (+${issueCount - 10} more — see metadata header issues=…)`);
+    const streamed = interactive && apiUiCtx.streamedValidationIssues.count > 0;
+    if (!streamed) {
+      ui.warning(`Validation reported ${issueCount} issue(s) (heuristic; first 10 shown):`);
+      for (const iss of result.validation!.issues.slice(0, 10)) {
+        ui.info(
+          `  [${iss.severity}] ${iss.kind}${iss.path ? ` ${iss.path}` : ''} — ${iss.detail}`,
+        );
+      }
+      if (issueCount > 10) {
+        ui.info(`  (+${issueCount - 10} more — see metadata header issues=…)`);
+      }
+    } else {
+      ui.warning(`Validation reported ${issueCount} issue(s) (details were streamed during the run).`);
     }
     if (issueCount > 50) {
       ui.warning('Large issue count may mean the validator is misfiring; try `squad new-plan --no-validation` to compare.');

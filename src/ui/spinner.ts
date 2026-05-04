@@ -4,6 +4,7 @@ import { isInteractive } from './tty.js';
 
 export interface SquadSpinner {
   update(text: string): void;
+  setPrefix(text: string): void;
   succeed(text?: string): void;
   fail(text?: string): void;
   stop(): void;
@@ -13,6 +14,7 @@ export function spinner(text: string): SquadSpinner {
   if (!isInteractive()) {
     return {
       update: (t) => process.stderr.write(`  ◆ ${t}\n`),
+      setPrefix: () => {},
       succeed: (t) => process.stderr.write(`  ✓ ${t ?? text}\n`),
       fail: (t) => process.stderr.write(`  ✗ ${t ?? text}\n`),
       stop: () => {},
@@ -28,6 +30,9 @@ export function spinner(text: string): SquadSpinner {
   return {
     update: (t) => {
       instance.text = t;
+    },
+    setPrefix: (t) => {
+      instance.prefixText = t === '' ? ' ' : t;
     },
     succeed: (t) => instance.succeed(t),
     fail: (t) => instance.fail(t),

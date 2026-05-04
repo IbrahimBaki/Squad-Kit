@@ -9,3 +9,11 @@ export { summaryBox, type SummaryRow } from './box.js';
 export { renderError } from './error.js';
 export { isInteractive } from './tty.js';
 export * as theme from './theme.js';
+export {
+  formatStagePipeline,
+  printStagePipeline,
+  type StageLine,
+  type StageState,
+} from './stage-pipeline.js';
+export { formatBudgetMeter, type BudgetSnapshot } from './budget-meter.js';
+export { formatThinkingLine } from './thinking-line.js';
