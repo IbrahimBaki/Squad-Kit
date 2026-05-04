@@ -9,40 +9,61 @@ export async function fetchProviderModelIds(
 ): Promise<
   { ok: true; ids: Set<string> } | { ok: false; kind: 'http'; status: number; body: string }
 > {
-  switch (provider) {
-    case 'anthropic': {
-      const res = await fetch('https://api.anthropic.com/v1/models?limit=200', {
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      });
-      if (!res.ok) {
-        return { ok: false, kind: 'http', status: res.status, body: await res.text() };
+  const netErr = (err: unknown): { ok: false; kind: 'http'; status: number; body: string } => {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, kind: 'http', status: 0, body: msg.slice(0, 500) };
+  };
+
+  try {
+    switch (provider) {
+      case 'anthropic': {
+        const res = await fetch('https://api.anthropic.com/v1/models?limit=200', {
+          headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        });
+        if (!res.ok) {
+          return { ok: false, kind: 'http', status: res.status, body: (await res.text()).slice(0, 2000) };
+        }
+        try {
+          const body = (await res.json()) as { data?: { id: string }[] };
+          return { ok: true, ids: new Set((body.data ?? []).map((m) => m.id)) };
+        } catch (err) {
+          return netErr(err);
+        }
       }
-      const body = (await res.json()) as { data: { id: string }[] };
-      return { ok: true, ids: new Set((body.data ?? []).map((m) => m.id)) };
-    }
-    case 'openai': {
-      const res = await fetch('https://api.openai.com/v1/models', {
-        headers: { authorization: `Bearer ${apiKey}` },
-      });
-      if (!res.ok) {
-        return { ok: false, kind: 'http', status: res.status, body: await res.text() };
+      case 'openai': {
+        const res = await fetch('https://api.openai.com/v1/models', {
+          headers: { authorization: `Bearer ${apiKey}` },
+        });
+        if (!res.ok) {
+          return { ok: false, kind: 'http', status: res.status, body: (await res.text()).slice(0, 2000) };
+        }
+        try {
+          const body = (await res.json()) as { data?: { id: string }[] };
+          return { ok: true, ids: new Set((body.data ?? []).map((m) => m.id)) };
+        } catch (err) {
+          return netErr(err);
+        }
       }
-      const body = (await res.json()) as { data: { id: string }[] };
-      return { ok: true, ids: new Set((body.data ?? []).map((m) => m.id)) };
-    }
-    case 'google': {
-      const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`,
-      );
-      if (!res.ok) {
-        return { ok: false, kind: 'http', status: res.status, body: await res.text() };
+      case 'google': {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`,
+        );
+        if (!res.ok) {
+          return { ok: false, kind: 'http', status: res.status, body: (await res.text()).slice(0, 2000) };
+        }
+        try {
+          const body = (await res.json()) as { models?: { name: string }[] };
+          return {
+            ok: true,
+            ids: new Set((body.models ?? []).map((m) => m.name.replace(/^models\//, ''))),
+          };
+        } catch (err) {
+          return netErr(err);
+        }
       }
-      const body = (await res.json()) as { models: { name: string }[] };
-      return {
-        ok: true,
-        ids: new Set((body.models ?? []).map((m) => m.name.replace(/^models\//, ''))),
-      };
     }
+  } catch (err) {
+    return netErr(err);
   }
 }
 
