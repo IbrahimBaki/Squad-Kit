@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import * as ui from '../ui/index.js';
 import { buildPaths, requireSquadRoot } from '../core/paths.js';
 import { loadConfig, type SquadConfig } from '../core/config.js';
-import { modelFor, providerEnvVar, resolveProviderKey } from '../core/planner-models.js';
 import { scanPlans, formatSequence } from '../core/sequence.js';
 import { listStories } from '../core/stories.js';
 import { loadSecrets, type SquadSecrets } from '../core/secrets.js';
@@ -61,21 +60,7 @@ export async function runStatus(): Promise<void> {
   }
 
   ui.kv('agents', config.agents.length ? config.agents.join(', ') : '(none)', kw);
-  if (config.planner?.enabled) {
-    const model = modelFor(config.planner.provider, 'plan', config.planner.modelOverride);
-    const overrideNote = config.planner.modelOverride?.[config.planner.provider] ? ' (override)' : '';
-    ui.kv('planner', `${config.planner.provider}/${model}${overrideNote}`, kw);
-    const cred = resolveProviderKey(config.planner.provider);
-    ui.kv(
-      'planner key',
-      cred
-        ? `set via ${cred.detail}`
-        : `missing — set ${providerEnvVar(config.planner.provider)} or run \`squad init\``,
-      kw,
-    );
-  } else {
-    ui.kv('planner', 'disabled (copy-paste flow)', kw);
-  }
+  ui.kv('planner', 'use /squad-plan-generate in Claude Code (no API key required)', kw);
   ui.kv('stories (drafts + planned)', String(storyCount), kw);
   ui.kv('plan files', String(planCount), kw);
   ui.kv('next NN', formatSequence(scan.nextGlobal), kw);

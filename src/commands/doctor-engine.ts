@@ -4,11 +4,9 @@ import { type SquadPaths } from '../core/paths.js';
 import { loadConfig, type SquadConfig } from '../core/config.js';
 import { loadSecrets, type SquadSecrets } from '../core/secrets.js';
 import { ensureGitignore, SQUAD_TRASH_PATTERN } from '../core/gitignore.js';
-import { modelFor, providerEnvVar, resolveProviderKey } from '../core/planner-models.js';
+import { modelFor } from '../core/planner-models.js';
 import { clientFor, overlayTrackerEnv, type ClientResolutionError } from '../tracker/index.js';
-import type { ProviderName } from '../planner/types.js';
 import {
-  fetchProviderModelIds,
   probeJiraConnectivity,
   probeAzureConnectivity,
   probeGitHubConnectivity,
@@ -180,135 +178,6 @@ async function checkLegacyPrompts(_paths: SquadPaths, ctx: DoctorContext): Promi
     };
   }
   return { id: 'legacy-prompts', name: 'legacy .squad/prompts/ directory', status: 'ok' };
-}
-
-async function checkPlannerConfig(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
-  if (!ctx.config) {
-    return {
-      id: 'planner-config',
-      name: 'planner configuration',
-      status: 'skip',
-      detail: 'config unavailable',
-    };
-  }
-  const p = ctx.config.planner;
-  if (p?.enabled !== true) {
-    return { id: 'planner-config', name: 'planner configuration', status: 'skip', detail: 'disabled' };
-  }
-  if (!['anthropic', 'openai', 'google'].includes(p.provider)) {
-    return {
-      id: 'planner-config',
-      name: 'planner configuration',
-      status: 'fail',
-      detail: `unsupported planner.provider "${p.provider}"`,
-    };
-  }
-  const mo = p.modelOverride;
-  if (mo) {
-    for (const key of ['anthropic', 'openai', 'google'] as const) {
-      const v = mo[key];
-      if (v !== undefined && (typeof v !== 'string' || v.trim().length === 0)) {
-        return {
-          id: 'planner-config',
-          name: 'planner configuration',
-          status: 'fail',
-          detail: `planner.modelOverride.${key} must be a non-empty string when set`,
-        };
-      }
-    }
-  }
-  if (p.budget.maxFileReads <= 0 || p.budget.maxContextBytes <= 0 || p.budget.maxDurationSeconds <= 0) {
-    return {
-      id: 'planner-config',
-      name: 'planner configuration',
-      status: 'fail',
-      detail: 'planner budget limits must be > 0',
-    };
-  }
-  return { id: 'planner-config', name: 'planner configuration', status: 'ok' };
-}
-
-async function checkPlannerCredential(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
-  if (!ctx.config || ctx.config.planner?.enabled !== true) {
-    return { id: 'planner-cred', name: 'planner credential resolves', status: 'skip', detail: 'planner disabled' };
-  }
-  const provider = ctx.config.planner.provider;
-  const resolved = resolveProviderKey(provider);
-  if (!resolved) {
-    const envVar = providerEnvVar(provider);
-    return {
-      id: 'planner-cred',
-      name: 'planner credential resolves',
-      status: 'fail',
-      detail: `no API key found (${envVar} or .squad/secrets.yaml)`,
-      fixHint: `Set ${envVar} or save a key via 'squad init' interactive setup`,
-    };
-  }
-  return {
-    id: 'planner-cred',
-    name: 'planner credential resolves',
-    status: 'ok',
-    detail: `source=${resolved.source} (${resolved.detail})`,
-  };
-}
-
-async function checkPlannerModel(_paths: SquadPaths, ctx: DoctorContext): Promise<CheckResult> {
-  if (!ctx.config || ctx.config.planner?.enabled !== true) {
-    return { id: 'planner-model', name: 'planner model resolves at provider', status: 'skip', detail: 'planner disabled' };
-  }
-  const provider = ctx.config.planner.provider;
-  const cred = resolveProviderKey(provider);
-  if (!cred) {
-    return {
-      id: 'planner-model',
-      name: 'planner model resolves at provider',
-      status: 'skip',
-      detail: 'no credential',
-    };
-  }
-  const model = modelFor(provider, 'plan', ctx.config.planner.modelOverride);
-  try {
-    const listed = await fetchProviderModelIds(provider, cred.value);
-    if (!listed.ok) {
-      const st = listed.status;
-      if (st === 401 || st === 403) {
-        return {
-          id: 'planner-model',
-          name: 'planner model resolves at provider',
-          status: 'warn',
-          detail: `models API HTTP ${st}`,
-        };
-      }
-      return {
-        id: 'planner-model',
-        name: 'planner model resolves at provider',
-        status: 'warn',
-        detail: `models API HTTP ${st}: ${listed.body.slice(0, 120)}`,
-      };
-    }
-    if (!listed.ids.has(model)) {
-      return {
-        id: 'planner-model',
-        name: 'planner model resolves at provider',
-        status: 'fail',
-        detail: `model "${model}" not listed by provider`,
-        fixHint: `Upgrade squad-kit for updated pins, set planner.modelOverride.${provider} in .squad/config.yaml, or switch planner.provider to a provider that exposes this model id.`,
-      };
-    }
-    return {
-      id: 'planner-model',
-      name: 'planner model resolves at provider',
-      status: 'ok',
-      detail: `${model} (${provider})`,
-    };
-  } catch (err) {
-    return {
-      id: 'planner-model',
-      name: 'planner model resolves at provider',
-      status: 'warn',
-      detail: (err as Error).message,
-    };
-  }
 }
 
 async function checkPlannerTierAwareness(
@@ -632,9 +501,6 @@ export async function runAllChecks(paths: SquadPaths, ctx: DoctorContext, fix: b
   await add('.squad/secrets.yaml permissions', () => checkSecretsPermissions(paths, ctx, fix));
   await add('.squad/secrets.yaml parseable', () => checkSecretsParseable(paths, ctx));
   await add('legacy .squad/prompts/ directory', () => checkLegacyPrompts(paths, ctx));
-  await add('planner configuration', () => checkPlannerConfig(paths, ctx));
-  await add('planner credential resolves', () => checkPlannerCredential(paths, ctx));
-  await add('planner model resolves at provider', () => checkPlannerModel(paths, ctx));
   await add('planner tier vs. model', () => checkPlannerTierAwareness(paths, ctx));
   await add('planner cache effectiveness', () => checkPlannerCache(paths, ctx));
   await add('planner runtime (resolved)', () => checkPlannerRuntimeInfo(paths, ctx));

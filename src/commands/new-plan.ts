@@ -2,44 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { confirm, select } from '@inquirer/prompts';
 import * as ui from '../ui/index.js';
-import { SquadExit } from '../core/cli-exit.js';
 import { buildPaths, requireSquadRoot, type SquadPaths } from '../core/paths.js';
-import { DEFAULT_PLANNER_MAX_OUTPUT_TOKENS, loadConfig, type SquadConfig } from '../core/config.js';
+import { loadConfig, type SquadConfig } from '../core/config.js';
 import { readFile } from '../utils/fs.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import { findStoryByIntake, listStories, type StoryRecord } from '../core/stories.js';
-import { runPlanner, type RunPlannerOutput } from '../planner/loop.js';
-import type { PlannerLimitDecision, PlannerSessionLimitContext } from '../planner/session-limits.js';
-import {
-  printPlannerApiCostNotice,
-  printPlannerLimitExplanation,
-  printPlannerLimitNextSteps,
-} from '../planner/planner-limit-messages.js';
-import { resolveRuntime, extractAnthropicProviderSpecific } from '../planner/runtimes/index.js';
-import type { AnthropicProviderSpecific } from '../planner/runtimes/types.js';
-import { Budget } from '../planner/budget.js';
-import { buildRepoMap } from '../core/repo-map.js';
-import { composeSystemPrompt, composeUserPrompt, composeScoutSystemPrompt } from '../planner/system-prompt.js';
-import { writePlanFile, buildMetadataHeader } from '../planner/writer.js';
 import { buildCopyPlanPromptMarkdown } from '../core/copy-plan-prompt.js';
-import { modelFor, providerEnvVar, readProviderKey } from '../core/planner-models.js';
-import { writeLastRun } from '../core/last-run.js';
-import { appendRun, newRunId } from '../core/runs.js';
-import { formatPlannerCacheLine } from '../ui/planner-cache-summary.js';
-import { PlannerEventBus } from '../planner/events.js';
-import { buildPlansIndex } from '../core/plans-index.js';
-import { summariseIssuesByKind } from '../planner/validation.js';
-import { dispatchNewPlanApiPlannerEvent, type NewPlanApiUiDispatchContext } from './new-plan-api-events.js';
 
 export interface NewPlanOptions {
-  /** Override `planner.runtime.anthropic` for this run (`agent-sdk` default). */
-  anthropicRuntime?: 'agent-sdk' | 'vercel';
-  /** Anthropic Agent SDK only: draft-stage effort (`minimal` → API `low`). */
-  effort?: 'minimal' | 'medium' | 'high';
-  /** Anthropic Agent SDK only: scout-stage effort. */
-  scoutEffort?: 'minimal' | 'medium' | 'high';
-  /** Anthropic Agent SDK only: disable extended thinking for this run. */
-  noThinking?: boolean;
   /** Default true; `--no-clipboard` sets false (copy-paste mode only). */
   clipboard?: boolean;
   /** `--copy` — force copy-paste mode. */
@@ -47,30 +17,23 @@ export interface NewPlanOptions {
   feature?: string;
   all?: boolean;
   yes?: boolean;
+  /** Kept so we can show a helpful error when used. */
   api?: boolean;
-  /** Disable cheap scout stage (single-stage draft only). */
-  noScout?: boolean;
-  /** Override scout model id. */
-  scoutModel?: string;
-  maxScoutFiles?: number;
-  /** Disable post-plan validation pass. */
-  noValidation?: boolean;
-  /** Write `*.partial.md` when validation reports issues. */
-  strictValidation?: boolean;
 }
 
-function decideMode(opts: NewPlanOptions, config: SquadConfig): 'api' | 'copy' {
-  if (opts.api && opts.copy) {
-    throw new Error('Pass either --api or --copy, not both. Run `squad new-plan --help` for valid flags.');
+function decideMode(opts: NewPlanOptions): 'copy' {
+  if (opts.api) {
+    throw new Error(
+      'squad new-plan --api is not available in this fork.\n' +
+        'Use /squad-plan-generate inside Claude Code instead — it runs the same planning logic\n' +
+        'using your Claude Code login, with no API key required.',
+    );
   }
-  if (opts.api) return 'api';
-  if (opts.copy) return 'copy';
-  const enabled = config.planner?.enabled;
-  const key = enabled && config.planner?.provider ? readProviderKey(config.planner.provider) : undefined;
-  return enabled && key ? 'api' : 'copy';
+  return 'copy';
 }
 
 export async function runNewPlan(intakePath: string | undefined, opts: NewPlanOptions): Promise<void> {
+  decideMode(opts);
   const root = requireSquadRoot();
   const paths = buildPaths(root);
   const config = loadConfig(paths.configFile);
@@ -89,13 +52,7 @@ export async function runNewPlan(intakePath: string | undefined, opts: NewPlanOp
     if (!proceed) return;
   }
 
-  const mode = decideMode(opts, config);
-
-  if (mode === 'api') {
-    await emitViaApi(story, paths, config, opts);
-  } else {
-    await emitCopyPrompt(story, paths, config, opts.clipboard !== false);
-  }
+  await emitCopyPrompt(story, paths, config, opts.clipboard !== false);
 }
 
 function resolveFromPath(intakePath: string, stories: StoryRecord[], root: string): StoryRecord {
@@ -178,413 +135,6 @@ async function confirmOverwrite(story: StoryRecord, interactive: boolean, yes: b
   return go;
 }
 
-function printPlannerRunIncompleteSummary(result: RunPlannerOutput, relPlanFile: string): void {
-  ui.blank();
-  ui.warning('Planning stopped before the model reported a clean completion.');
-  ui.kv('saved', relPlanFile, 8);
-  if (result.userCancelled) ui.kv('stopped', 'you chose not to continue after a limit', 8);
-  if (result.timedOut) ui.kv('timed out', 'yes', 8);
-  if (result.budgetExhausted) ui.kv('read budget', 'exhausted (model was asked to finalise)', 8);
-  if (result.incompleteKind) ui.kv('detail', result.incompleteKind, 8);
-  ui.blank();
-  ui.info('The file uses the `.partial.md` suffix and YAML `squad-kit-plan-status: partial`.');
-  ui.info('Raise limits in `.squad/config.yaml` (`planner.budget`, `planner.maxOutputTokens`) or re-run when ready.');
-}
-
-async function emitViaApi(
-  story: StoryRecord,
-  paths: SquadPaths,
-  config: SquadConfig,
-  opts: NewPlanOptions,
-): Promise<void> {
-  const planner = config.planner;
-  if (!planner?.enabled) {
-    throw new Error(
-      'Direct planner API is not configured. Run `squad init --force` to enable it, or `squad new-plan --copy` for the manual copy-paste flow.',
-    );
-  }
-  const apiKey = readProviderKey(planner.provider);
-  if (!apiKey) {
-    throw new Error(
-      `Missing ${providerEnvVar(planner.provider)}. Run \`squad config set planner\` to save a key to secrets, or export the env var, or run \`squad new-plan --copy\` without the API.`,
-    );
-  }
-
-  const modelId = modelFor(planner.provider, 'plan', planner.modelOverride);
-
-  const anthropicRuntimeChoice =
-    opts.anthropicRuntime ?? planner.runtime?.anthropic ?? 'agent-sdk';
-
-  const draftRuntime = resolveRuntime({
-    provider: planner.provider,
-    modelId,
-    apiKey,
-    anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
-  });
-
-  const thinkingCli = opts.noThinking ? ('off' as const) : undefined;
-  const anthropicProviderSpecific: { scout?: AnthropicProviderSpecific; draft?: AnthropicProviderSpecific } | undefined =
-    planner.provider === 'anthropic'
-      ? {
-          draft: extractAnthropicProviderSpecific(planner, 'draft', {
-            effort: opts.effort,
-            thinking: thinkingCli,
-          }),
-          scout: extractAnthropicProviderSpecific(planner, 'scout', {
-            effort: opts.scoutEffort,
-            thinking: thinkingCli,
-          }),
-        }
-      : undefined;
-
-  const budget = new Budget(planner.budget);
-
-  ui.banner();
-  ui.step(`planning   ${story.feature} / ${story.id}`);
-  ui.kv('provider', planner.provider);
-  ui.kv('model', modelId);
-  ui.blank();
-
-  const interactive = !opts.yes && Boolean(process.stdin.isTTY);
-  if (interactive) {
-    printPlannerApiCostNotice();
-  }
-
-  const mapSpinner = ui.spinner('building repo map…');
-  const repoMap = buildRepoMap(paths.root, { format: 'tree' });
-  mapSpinner.succeed(
-    `repo map ready  (${repoMap.split('\n').length - 1} paths · ${(repoMap.length / 1024).toFixed(1)} KB)`,
-  );
-
-  ui.divider('planner session');
-
-  const systemPrompt = composeSystemPrompt({
-    projectRoots: config.project.projectRoots ?? ['.'],
-    primaryLanguage: config.project.primaryLanguage ?? '',
-    trackerType: config.tracker.type,
-    repoMap,
-  });
-  const userPrompt = composeUserPrompt({ intakeContent: readFile(story.intakePath) });
-
-  const scoutEnabled = !opts.noScout && planner.stages?.scout?.enabled !== false;
-  const validationEnabled = !opts.noValidation && planner.validation?.enabled !== false;
-  const strictValidation = !!opts.strictValidation || planner.validation?.strict === true;
-  const maxScoutFiles = opts.maxScoutFiles ?? planner.stages?.scout?.maxFiles ?? 12;
-
-  let scoutModelId = '';
-  let scoutRuntime: ReturnType<typeof resolveRuntime> | undefined;
-  let scoutSystemPrompt: string | undefined;
-  if (scoutEnabled) {
-    scoutModelId = modelFor(
-      planner.provider,
-      'scout',
-      planner.modelOverride,
-      opts.scoutModel ?? planner.stages?.scout?.modelOverride,
-    );
-    scoutRuntime = resolveRuntime({
-      provider: planner.provider,
-      modelId: scoutModelId,
-      apiKey,
-      anthropicRuntime: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
-    });
-    scoutSystemPrompt = composeScoutSystemPrompt({
-      projectRoots: config.project.projectRoots ?? ['.'],
-      primaryLanguage: config.project.primaryLanguage ?? '',
-      trackerType: config.tracker.type,
-      repoMap,
-      plansIndex: buildPlansIndex(paths),
-    });
-  }
-
-  const sessionSpinner: { current: ReturnType<typeof ui.spinner> | null } = { current: null };
-  const startedAt = Date.now();
-  const cacheEnabled = planner.cache?.enabled ?? true;
-  const runId = newRunId();
-  const bus = new PlannerEventBus();
-
-  const apiUiCtx: NewPlanApiUiDispatchContext = {
-    sessionSpinner,
-    stageLine: { scout: 'pending', draft: 'pending', validation: 'pending' },
-    activePlannerStage: null,
-    thinkingBlockChars: 0,
-    thinkingState: { running: false, blockStartedAt: 0, totalChars: 0, totalDurationMs: 0 },
-    thinkingSpinner: { current: null },
-    thinkingTick: { id: null },
-    budget,
-    budgetCaps: null,
-    startedAt,
-    interactive,
-    stagesIntroPrinted: false,
-    lastToolUi: null,
-    streamedValidationIssues: { count: 0 },
-    validationStreamCappedMsg: false,
-    anthropicRuntimeChoice: planner.provider === 'anthropic' ? anthropicRuntimeChoice : undefined,
-    usageAcc: { inputTokens: 0, outputTokens: 0 },
-  };
-
-  const unsubscribe = bus.subscribe((e) => {
-    dispatchNewPlanApiPlannerEvent(apiUiCtx, e);
-  });
-
-  const decideOnLimit = interactive
-    ? async (ctx: PlannerSessionLimitContext): Promise<PlannerLimitDecision> => {
-        printPlannerLimitExplanation(ctx);
-        const ans = await select({
-          message: 'Continue this planning session? (Continuing sends more API requests and is billed.)',
-          choices: [
-            { name: 'Continue — extend limits for this run', value: 'continue' as const },
-            { name: 'Stop — save partial plan and exit', value: 'cancel' as const },
-          ],
-        });
-        if (ans === 'cancel') printPlannerLimitNextSteps();
-        return ans;
-      }
-    : undefined;
-
-  let result: RunPlannerOutput;
-  try {
-    result = await runPlanner({
-      root: paths.root,
-      runtime: draftRuntime,
-      provider: planner.provider,
-      modelId,
-      anthropicProviderSpecific,
-      systemPrompt,
-      userPrompt,
-      budget,
-      maxOutputTokens: planner.maxOutputTokens,
-      cacheEnabled,
-      decideOnLimit,
-      events: bus,
-      runId,
-      paths,
-      stages: {
-        scout: {
-          enabled: scoutEnabled,
-          runtime: scoutRuntime,
-          modelId: scoutModelId,
-          maxFiles: maxScoutFiles,
-          maxOutputTokens: planner.stages?.scout?.maxOutputTokens ?? 2048,
-        },
-      },
-      validation: { enabled: validationEnabled, strict: strictValidation },
-      toolsEnabled: planner.tools,
-      scoutSystemPrompt,
-    });
-  } finally {
-    await bus.finalizeEventPersistence?.();
-    unsubscribe();
-    if (apiUiCtx.thinkingTick.id) {
-      clearInterval(apiUiCtx.thinkingTick.id);
-      apiUiCtx.thinkingTick.id = null;
-    }
-    apiUiCtx.thinkingSpinner.current?.stop();
-    sessionSpinner.current?.stop();
-  }
-
-  if (!result.planText.trim()) {
-    throw new Error(
-      'Planner returned no plan text. Run `squad doctor` to check provider and models, or `squad new-plan --copy` to avoid the API.',
-    );
-  }
-
-  const snap = budget.snapshot();
-  const elapsedMs = Date.now() - startedAt;
-  const issueCount = result.validation?.issues.length ?? 0;
-  const issuesByKind = summariseIssuesByKind(result.validation?.issues ?? []);
-  const validationBlocks =
-    strictValidation && validationEnabled && issueCount > 0;
-  const success =
-    result.finishedNormally &&
-    !result.timedOut &&
-    !result.userCancelled &&
-    !validationBlocks;
-
-  const header = buildMetadataHeader({
-    provider: planner.provider,
-    model: modelId,
-    reads: snap.reads,
-    bytes: snap.bytes,
-    inputTokens: snap.usage.inputTokens,
-    outputTokens: snap.usage.outputTokens,
-    durationMs: elapsedMs,
-    planStatus: success ? undefined : 'partial',
-    scoutEnabled,
-    validationEnabled,
-    validationIssueCount: issueCount,
-  });
-
-  const { planFile, sequenceNumber, overwrote } = writePlanFile({
-    paths,
-    config,
-    story,
-    planBodyMarkdown: result.planText,
-    metadataHeader: header,
-    partial: !success,
-  });
-
-  const relPlan = path.relative(paths.root, planFile);
-
-  try {
-    await writeLastRun(paths, {
-      stats: result.stats,
-      completedAt: new Date().toISOString(),
-      provider: planner.provider,
-      model: modelId,
-    });
-    await appendRun(paths, {
-      runId,
-      provider: planner.provider,
-      model: modelId,
-      feature: story.feature,
-      storyId: story.id,
-      startedAt: new Date(startedAt).toISOString(),
-      completedAt: new Date().toISOString(),
-      success,
-      partial: !success,
-      planFile: relPlan,
-      stats: result.stats,
-      cacheEnabled,
-      durationMs: elapsedMs,
-      scout: {
-        enabled: scoutEnabled,
-        selectedCount: result.scout?.selected.length,
-        tokensUsed: result.scout?.tokensUsed,
-        durationMs: result.scout?.durationMs,
-      },
-      validation: {
-        enabled: validationEnabled,
-        issuesCount: issueCount,
-        issuesByKind,
-        durationMs: result.validation?.durationMs,
-      },
-      plannerRuntime: { kind: draftRuntime.kind, provider: planner.provider },
-      providerOptionsSnapshot: anthropicProviderSpecific
-        ? { anthropic: anthropicProviderSpecific }
-        : undefined,
-    });
-  } catch {
-    // best-effort telemetry
-  }
-
-  const stripAnsi = (s: string) => s.replace(/\x1B\[[0-9;]*m/g, '');
-  const budgetCapsForSummary = budget.caps();
-
-  ui.blank();
-  ui.summaryBox(success ? ' plan generated ' : ' plan saved (incomplete) ', [
-    { key: 'file', value: relPlan },
-    { key: 'nn', value: String(sequenceNumber).padStart(2, '0') },
-    { key: 'model', value: `${planner.provider}/${modelId}` },
-    {
-      key: 'runtime',
-      value: (() => {
-        let chips = '';
-        if (planner.provider === 'anthropic') {
-          const d = anthropicProviderSpecific?.draft;
-          if (d?.effort) chips += ` · effort ${d.effort}`;
-          if (d?.thinking && d.thinking !== 'off') chips += ` · thinking ${d.thinking}`;
-        }
-        const rollup =
-          apiUiCtx.thinkingState.totalChars > 0
-            ? ` · Σ ${apiUiCtx.thinkingState.totalChars} thinking chars`
-            : '';
-        return `${draftRuntime.kind} · ${planner.provider}${chips}${rollup}`;
-      })(),
-    },
-    { key: 'events', value: `.squad/runs/${runId}.events.jsonl` },
-    {
-      key: 'scout',
-      value: scoutEnabled
-        ? `${result.scout?.selected.length ?? 0} files · ${result.scout?.tokensUsed ?? 0} tok`
-        : 'disabled',
-    },
-    {
-      key: 'validation',
-      value: validationEnabled ? `${issueCount} issue(s)` : 'disabled',
-    },
-    {
-      key: 'reads',
-      value: stripAnsi(
-        ui.formatBudgetMeter({
-          reads: snap.reads,
-          readsCap: budgetCapsForSummary.maxFileReads,
-          bytes: snap.bytes,
-          bytesCap: budgetCapsForSummary.maxContextBytes,
-          elapsedMs,
-          durationMsCap: budgetCapsForSummary.maxDurationSeconds * 1000,
-        }),
-      ),
-    },
-    {
-      key: 'tokens',
-      value:
-        `${snap.usage.inputTokens} in · ${snap.usage.outputTokens} out` +
-        (draftRuntime.kind === 'agent-sdk' ? ' (agent-sdk: aggregate-only)' : ''),
-    },
-    {
-      key: 'cache',
-      value: formatPlannerCacheLine({
-        cacheEnabled,
-        stats: result.stats,
-        plannerRuntimeKind: draftRuntime.kind,
-      }),
-    },
-    {
-      key: 'max out',
-      value: `${planner.maxOutputTokens ?? DEFAULT_PLANNER_MAX_OUTPUT_TOKENS} tok/req`,
-    },
-    { key: 'time', value: `${Math.round(elapsedMs / 1000)}s` },
-    {
-      key: 'action',
-      value: success
-        ? overwrote
-          ? 'overwrote existing plan'
-          : 'new plan'
-        : validationBlocks
-          ? 'partial plan (validation issues — review or use --no-validation)'
-          : 'partial plan (review limits)',
-    },
-  ]);
-
-  if (issueCount > 0 && validationEnabled) {
-    ui.blank();
-    const streamed = interactive && apiUiCtx.streamedValidationIssues.count > 0;
-    if (!streamed) {
-      ui.warning(`Validation reported ${issueCount} issue(s) (heuristic; first 10 shown):`);
-      for (const iss of result.validation!.issues.slice(0, 10)) {
-        ui.info(
-          `  [${iss.severity}] ${iss.kind}${iss.path ? ` ${iss.path}` : ''} — ${iss.detail}`,
-        );
-      }
-      if (issueCount > 10) {
-        ui.info(`  (+${issueCount - 10} more — see metadata header issues=…)`);
-      }
-    } else {
-      ui.warning(`Validation reported ${issueCount} issue(s) (details were streamed during the run).`);
-    }
-    if (issueCount > 50) {
-      ui.warning('Large issue count may mean the validator is misfiring; try `squad new-plan --no-validation` to compare.');
-    }
-  }
-
-  if (!success) {
-    if (!validationBlocks || !result.finishedNormally) {
-      printPlannerRunIncompleteSummary(result, relPlan);
-    } else {
-      ui.blank();
-      ui.warning('Plan saved as partial because strict validation reported issues.');
-    }
-    throw new SquadExit(2);
-  }
-
-  if (result.budgetExhausted) {
-    ui.info('Note: file-read budget was reached; the model finalised without further reads.');
-  }
-
-  ui.blank();
-  ui.info(`next  →  open a new agent chat and attach only ${path.basename(planFile)}`);
-}
-
 async function emitCopyPrompt(
   story: StoryRecord,
   paths: SquadPaths,
@@ -647,12 +197,13 @@ function printModelBanner(config: SquadConfig): void {
   ui.blank();
   ui.divider('paste into your agent');
   ui.info('Recommendation: switch to a strong planning model before pasting.');
+  ui.info('Tip: Use /squad-plan-generate inside Claude Code to generate the plan directly (no API key needed).');
   const agents = config.agents ?? [];
   const hint = (name: string, msg: string) => {
     if (agents.includes(name)) ui.kv(name, msg, 14);
   };
   hint('cursor', 'model picker → Claude Opus 4.x or GPT-5.3 Codex (thinking)');
-  hint('claude-code', '/model claude-opus-4-x');
+  hint('claude-code', '/squad-plan-generate <intake-path>  (or /model claude-opus-4-x for copy-paste)');
   hint('copilot', 'chat model picker → the strongest available reasoning model');
   hint('gemini', '/model gemini-deep-think (or the latest strongest)');
   if (agents.length === 0) {

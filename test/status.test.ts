@@ -113,68 +113,8 @@ describe('runStatus tracker + planner key rows', () => {
     spy.mockRestore();
   });
 
-  it('planner key row uses resolveProviderKey detail', async () => {
-    const cfg: SquadConfig = {
-      ...baseJiraConfig,
-      planner: {
-        enabled: true,
-        provider: 'anthropic',
-        mode: 'auto',
-        budget: { maxFileReads: 25, maxContextBytes: 50_000, maxDurationSeconds: 180 },
-      },
-    };
-    saveConfig(path.join(tmp, SQUAD_DIR, 'config.yaml'), cfg);
-    writeJiraSecrets('h.example.com', 'a@b.co', 'tok1234567890');
-    const f = path.join(tmp, SQUAD_DIR, 'secrets.yaml');
-    const body = fs.readFileSync(f, 'utf8');
-    fs.writeFileSync(
-      f,
-      `${body}planner:\n  anthropic: sk-1234567890123456789\n`,
-      'utf8',
-    );
-
-    const rows: { k: string; v: string }[] = [];
-    const spy = vi.spyOn(ui, 'kv').mockImplementation((k: string, v: string) => {
-      rows.push({ k, v: String(v) });
-    });
-    vi.spyOn(ui, 'banner').mockImplementation(() => true);
-    vi.spyOn(ui, 'step').mockImplementation(() => true);
-    vi.spyOn(ui, 'blank').mockImplementation(() => true);
-
-    await runStatus();
-
-    const pk = rows.find((r) => r.k === 'planner key');
-    expect(pk?.v).toContain('.squad/secrets.yaml');
-
-    const prev = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = 'sk-env-override-12345';
-    try {
-      const rows2: { k: string; v: string }[] = [];
-      const spy2 = vi.spyOn(ui, 'kv').mockImplementation((k: string, v: string) => {
-        rows2.push({ k, v: String(v) });
-      });
-      await runStatus();
-      const pk2 = rows2.find((r) => r.k === 'planner key');
-      expect(pk2?.v).toContain('ANTHROPIC_API_KEY');
-    } finally {
-      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
-      else process.env.ANTHROPIC_API_KEY = prev;
-    }
-    spy.mockRestore();
-  });
-
-  it('annotates planner row with (override) when planner.modelOverride is set for provider', async () => {
-    const cfg: SquadConfig = {
-      ...baseJiraConfig,
-      planner: {
-        enabled: true,
-        provider: 'anthropic',
-        mode: 'auto',
-        budget: { maxFileReads: 25, maxContextBytes: 50_000, maxDurationSeconds: 180 },
-        modelOverride: { anthropic: 'claude-opus-5-0-fake' },
-      },
-    };
-    saveConfig(path.join(tmp, SQUAD_DIR, 'config.yaml'), cfg);
+  it('shows /squad-plan-generate hint in planner row', async () => {
+    saveConfig(path.join(tmp, SQUAD_DIR, 'config.yaml'), baseJiraConfig);
     writeJiraSecrets('h.example.com', 'a@b.co', 'tok1234567890');
 
     const rows: { k: string; v: string }[] = [];
@@ -188,9 +128,7 @@ describe('runStatus tracker + planner key rows', () => {
     await runStatus();
 
     const pl = rows.find((r) => r.k === 'planner');
-    expect(pl?.v).toContain('anthropic/');
-    expect(pl?.v).toContain('claude-opus-5-0-fake');
-    expect(pl?.v).toContain('(override)');
+    expect(pl?.v).toContain('/squad-plan-generate');
     spy.mockRestore();
   });
 });

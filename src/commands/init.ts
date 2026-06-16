@@ -1,26 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { input, select, checkbox, confirm, password } from '@inquirer/prompts';
+import { input, select, checkbox, confirm } from '@inquirer/prompts';
 import * as ui from '../ui/index.js';
 import { isInteractive } from '../ui/tty.js';
 import { buildPaths, SQUAD_DIR } from '../core/paths.js';
 import { ensureGitignore } from '../core/gitignore.js';
 import {
-  DEFAULT_PLANNER_MAX_OUTPUT_TOKENS,
   saveConfig,
   type SquadConfig,
   type TrackerType,
 } from '../core/config.js';
-import { modelFor, providerEnvVar, resolveProviderKey } from '../core/planner-models.js';
 import { copyTree, templatesDir, writeFileSafe, readFile } from '../utils/fs.js';
 import { render } from '../core/template.js';
-import type { PlannerConfig } from '../planner/types.js';
-import type { ProviderName } from '../planner/types.js';
 import { loadSecrets, saveSecrets, mergeSecrets, type SquadSecrets } from '../core/secrets.js';
 import {
   runConfigSetPlanner,
   runConfigSetTracker,
-  mergePlannerKeyIntoSecrets,
   promptJiraCredentials,
   promptAzureCredentials,
 } from './config/index.js';
@@ -36,10 +31,8 @@ export interface InitOptions {
   language?: string;
   force?: boolean;
   yes?: boolean;
-  /** Skip Jira/Azure + planner key prompts (no writes to secrets.yaml from prompts). */
+  /** Skip Jira/Azure key prompts (no writes to secrets.yaml from prompts). */
   noPromptSecrets?: boolean;
-  /** String provider when `--planner`; `false` when `--no-planner` (commander). */
-  planner?: string | false;
 }
 
 const SUPPORTED_AGENTS = ['claude-code', 'cursor', 'copilot', 'gemini'] as const;
@@ -156,88 +149,6 @@ export async function runInit(opts: InitOptions): Promise<void> {
     ui.info('.squad/secrets.yaml updated (chmod 0600 on POSIX)');
   }
 
-  let plannerBlock: PlannerConfig | undefined;
-  if (opts.yes) {
-    if (opts.planner && opts.planner !== 'false') {
-      const provider = opts.planner;
-      if (!['anthropic', 'openai', 'google'].includes(provider)) {
-        throw new Error(
-          '--planner must be one of anthropic | openai | google. Run `squad init --planner anthropic` (or openai / google) with `--yes` in non-interactive mode.',
-        );
-      }
-      plannerBlock = {
-        enabled: true,
-        provider: provider as ProviderName,
-        mode: 'auto',
-        budget: {
-          maxFileReads: 25,
-          maxContextBytes: 50_000,
-          maxDurationSeconds: 180,
-        },
-        cache: { enabled: true },
-        maxOutputTokens: DEFAULT_PLANNER_MAX_OUTPUT_TOKENS,
-      };
-    }
-  } else {
-    const plannerEnabled = await confirm({
-      message:
-        'Enable automatic plan generation? (press Enter to skip — you can always edit .squad/config.yaml later)',
-      default: false,
-    });
-    if (plannerEnabled) {
-      const provider = (await select({
-        message: 'Planner provider:',
-        choices: [
-          { name: 'Anthropic (Claude)', value: 'anthropic' as ProviderName },
-          { name: 'OpenAI (GPT)', value: 'openai' as ProviderName },
-          { name: 'Google (Gemini)', value: 'google' as ProviderName },
-        ],
-        default: 'anthropic' as ProviderName,
-      })) as ProviderName;
-      plannerBlock = {
-        enabled: true,
-        provider,
-        mode: 'auto',
-        budget: {
-          maxFileReads: 25,
-          maxContextBytes: 50_000,
-          maxDurationSeconds: 180,
-        },
-        cache: { enabled: true },
-        maxOutputTokens: DEFAULT_PLANNER_MAX_OUTPUT_TOKENS,
-      };
-    }
-  }
-
-  if (plannerBlock?.enabled && allowSecretPrompts) {
-    const envVar = providerEnvVar(plannerBlock.provider);
-    const envPresent = Boolean(process.env[envVar]);
-    if (envPresent) {
-      ui.info(`Planner key detected in ${envVar}; keeping env-var resolution as the primary source.`);
-    } else {
-      const storeKey = (await select({
-        message: `No ${envVar} in your environment. How do you want to store your planner API key?`,
-        choices: [
-          { name: `Enter it now and save to .squad/secrets.yaml (git-ignored)`, value: 'secrets' as const },
-          { name: `I'll export ${envVar} in my shell profile myself`, value: 'env' as const },
-        ],
-      })) as 'secrets' | 'env';
-
-      if (storeKey === 'secrets') {
-        const key = await password({
-          message: `${envVar} value (input hidden):`,
-          validate: (v) => (v.length >= 20 ? true : 'key looks too short'),
-        });
-        const base = loadSecrets(paths.secretsFile);
-        const merged = mergePlannerKeyIntoSecrets(base, plannerBlock.provider, key);
-        saveSecrets(paths.secretsFile, merged);
-        ui.success('Planner key saved to .squad/secrets.yaml');
-      } else {
-        ui.info(`Remember to export ${envVar} before running \`squad new-plan\`.`);
-      }
-    }
-  }
-
   const trackerConfig: SquadConfig['tracker'] = { type: answers.tracker };
   if (answers.tracker === 'jira' || answers.tracker === 'azure') {
     if (trackerWorkspace) trackerConfig.workspace = trackerWorkspace;
@@ -250,7 +161,6 @@ export async function runInit(opts: InitOptions): Promise<void> {
     tracker: trackerConfig,
     naming: { includeTrackerId, globalSequence: true },
     agents: answers.agents,
-    planner: plannerBlock,
   };
 
   fs.mkdirSync(paths.squadDir, { recursive: true });
@@ -283,28 +193,10 @@ export async function runInit(opts: InitOptions): Promise<void> {
   ui.success(`Initialized ${SQUAD_DIR}/ at ${root}`);
   ui.kv('tracker', config.tracker.type, 7);
   ui.kv('agents', answers.agents.length ? answers.agents.join(', ') : '(none)', 7);
-  if (plannerBlock) {
-    const envVar = providerEnvVar(plannerBlock.provider);
-    const hasKey = Boolean(resolveProviderKey(plannerBlock.provider));
-    const model = modelFor(plannerBlock.provider, 'plan', plannerBlock.modelOverride);
-    const overrideNote = plannerBlock.modelOverride?.[plannerBlock.provider] ? ' (override)' : '';
-    ui.kv('planner', `${plannerBlock.provider}/${model}${overrideNote}`);
-    ui.kv('key', hasKey ? `✓ (${envVar} or .squad/secrets.yaml)` : `missing (set ${envVar})`);
-    if (!hasKey) {
-      ui.blank();
-      ui.warning('Planner key not found in environment or .squad/secrets.yaml.');
-      ui.info('Set one of these before running `squad new-plan`:');
-      ui.info(`  export ${envVar}=<your-key>`);
-      ui.info('  # or use a cross-provider fallback:');
-      ui.info('  export SQUAD_PLANNER_API_KEY=<your-key>');
-      ui.info('  # or re-run `squad init` and save the key to .squad/secrets.yaml when prompted.');
-      ui.info('squad-kit never reads keys from .squad/config.yaml.');
-    }
-  }
   ui.blank();
   ui.step('Next:');
   ui.info('1) squad new-story <feature-slug>');
-  ui.info('2) Fill the generated intake.md, then run /squad-plan in your agent (or squad new-plan).');
+  ui.info('2) Fill the generated intake.md, then run /squad-plan-generate in Claude Code (or squad new-plan --copy for clipboard).');
 }
 
 function parseAgentsFlag(flag?: string): AgentName[] {

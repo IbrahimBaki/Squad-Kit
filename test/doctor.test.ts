@@ -6,7 +6,6 @@ import { runDoctor } from '../src/commands/doctor.js';
 import { saveConfig, DEFAULT_CONFIG, type SquadConfig } from '../src/core/config.js';
 import { SQUAD_DIR } from '../src/core/paths.js';
 import { ensureGitignore } from '../src/core/gitignore.js';
-import { PLANNER_MODEL_MAP } from '../src/core/planner-models.js';
 
 type FetchInput = Parameters<typeof globalThis.fetch>[0];
 
@@ -121,40 +120,6 @@ describe('runDoctor', () => {
     await expect(runDoctor({ json: true })).rejects.toThrow('EXIT:1');
   });
 
-  it('planner enabled without API key fails credential check', async () => {
-    const prevAnthropic = process.env.ANTHROPIC_API_KEY;
-    const prevFallback = process.env.SQUAD_PLANNER_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.SQUAD_PLANNER_API_KEY;
-    try {
-      installWorkspace({
-        ...DEFAULT_CONFIG,
-        planner: {
-          enabled: true,
-          provider: 'anthropic',
-          mode: 'auto',
-          budget: {
-            maxFileReads: 10,
-            maxContextBytes: 20_000,
-            maxDurationSeconds: 60,
-          },
-        },
-      });
-      ensureGitignore(tmp);
-
-      exitMock.mockRestore();
-      exitMock = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
-        throw new Error(`EXIT:${code ?? ''}`);
-      });
-      await expect(runDoctor({ json: true })).rejects.toThrow('EXIT:1');
-    } finally {
-      if (prevAnthropic !== undefined) process.env.ANTHROPIC_API_KEY = prevAnthropic;
-      else delete process.env.ANTHROPIC_API_KEY;
-      if (prevFallback !== undefined) process.env.SQUAD_PLANNER_API_KEY = prevFallback;
-      else delete process.env.SQUAD_PLANNER_API_KEY;
-    }
-  });
-
   it('planner tier-awareness warns for Anthropic Opus and stays ok for Sonnet/Haiku', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify({ data: [] }), { status: 200 })),
@@ -243,134 +208,6 @@ describe('runDoctor', () => {
       } finally {
         cap.restore();
       }
-    } finally {
-      fetchSpy.mockRestore();
-      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
-      else delete process.env.ANTHROPIC_API_KEY;
-    }
-  });
-
-  it('planner model probe succeeds when /v1/models lists pinned id', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(
-        new Response(
-          JSON.stringify({
-            data: [{ id: PLANNER_MODEL_MAP.anthropic.plan }, { id: 'other' }],
-          }),
-          { status: 200 },
-        ),
-      ),
-    );
-    const prev = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = 'sk-test';
-    try {
-      installWorkspace({
-        ...DEFAULT_CONFIG,
-        planner: {
-          enabled: true,
-          provider: 'anthropic',
-          mode: 'auto',
-          budget: {
-            maxFileReads: 10,
-            maxContextBytes: 20_000,
-            maxDurationSeconds: 60,
-          },
-        },
-      });
-      ensureGitignore(tmp);
-
-      const cap = captureStdout();
-      try {
-        await runDoctor({ json: true });
-        const j = JSON.parse(cap.text()) as { checks: { id: string; status: string }[] };
-        const row = j.checks.find((c) => c.id === 'planner-model');
-        expect(row?.status).toBe('ok');
-      } finally {
-        cap.restore();
-      }
-      expect(exitMock).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
-      else delete process.env.ANTHROPIC_API_KEY;
-    }
-  });
-
-  it('planner model probe fails when pinned id is missing from provider list', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify({ data: [{ id: 'some-other-model' }] }), { status: 200 })),
-    );
-    const prev = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = 'sk-test';
-    try {
-      installWorkspace({
-        ...DEFAULT_CONFIG,
-        planner: {
-          enabled: true,
-          provider: 'anthropic',
-          mode: 'auto',
-          budget: {
-            maxFileReads: 10,
-            maxContextBytes: 20_000,
-            maxDurationSeconds: 60,
-          },
-        },
-      });
-      ensureGitignore(tmp);
-
-      const cap = captureStdout();
-      exitMock.mockRestore();
-      exitMock = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined) => {
-        throw new Error(`EXIT:${code ?? ''}`);
-      });
-      try {
-        await expect(runDoctor({ json: true })).rejects.toThrow('EXIT:1');
-        const j = JSON.parse(cap.text()) as {
-          checks: { id: string; status: string; fixHint?: string }[];
-        };
-        const row = j.checks.find((c) => c.id === 'planner-model');
-        expect(row?.status).toBe('fail');
-        expect(row?.fixHint).toBeTruthy();
-      } finally {
-        cap.restore();
-      }
-    } finally {
-      fetchSpy.mockRestore();
-      if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
-      else delete process.env.ANTHROPIC_API_KEY;
-    }
-  });
-
-  it('planner model probe warns when fetch throws', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ENOTFOUND'));
-    const prev = process.env.ANTHROPIC_API_KEY;
-    process.env.ANTHROPIC_API_KEY = 'sk-test';
-    try {
-      installWorkspace({
-        ...DEFAULT_CONFIG,
-        planner: {
-          enabled: true,
-          provider: 'anthropic',
-          mode: 'auto',
-          budget: {
-            maxFileReads: 10,
-            maxContextBytes: 20_000,
-            maxDurationSeconds: 60,
-          },
-        },
-      });
-      ensureGitignore(tmp);
-
-      const cap = captureStdout();
-      try {
-        await runDoctor({ json: true });
-        const j = JSON.parse(cap.text()) as { checks: { id: string; status: string }[] };
-        const row = j.checks.find((c) => c.id === 'planner-model');
-        expect(row?.status).toBe('warn');
-      } finally {
-        cap.restore();
-      }
-      expect(exitMock).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
       if (prev !== undefined) process.env.ANTHROPIC_API_KEY = prev;
