@@ -13,6 +13,52 @@
 
 **Plan once, execute cheap.** A 3-step SDD-style workflow CLI for AI-assisted coding: **raw story → good plan → implementation**. Your expensive model plans once. A cheap model executes many times. Squad-kit owns the folder conventions, the plan meta-prompt, and the agent slash-commands so the token cost goes where it pays off. Deeper product notes live on **[squad-kit.com](https://squad-kit.com)** and in [`docs/`](docs/philosophy.md).
 
+---
+
+> ## 🔱 This is a fork
+>
+> This is a modified fork of [`AzmSquad/Squad-Kit`](https://github.com/AzmSquad/Squad-Kit). It runs **entirely on your Claude Code login — no Anthropic API key required** — and adds a local-first workflow plus optional Azure DevOps logging.
+>
+> **Key differences from the original:**
+> - **No API planner.** The `--api` planner (and its API key requirement) is removed. Plans are generated inside Claude Code via `/squad-plan-generate`.
+> - **Local-first quick flow.** `/squad-quick "<description>"` analyzes your codebase, drafts the intake, and generates a plan — no tracker needed.
+> - **Azure logging on demand.** `/squad-log` documents finished work as an Azure DevOps work item, after the fact.
+>
+> 👉 **Full details: [FORK-CHANGES.md](FORK-CHANGES.md)**
+
+---
+
+## The flow in this fork
+
+**Local-first (daily work) — no tracker:**
+
+```
+/squad-quick "in stats In Probation … not reflected with filters"
+        │   Claude analyzes the code, writes the intake, generates the plan
+        ▼
+   review the plan
+        │
+        ▼
+/squad-implement <plan>          # fresh session, executes the plan
+        │
+        ▼ (optional)
+/squad-log --kind Bug --parent 6432 q-stats-filter   # document it on Azure
+```
+
+**Tracker-first (existing Azure story) — unchanged from the SDD flow:**
+
+```
+squad new-story <feature> --id 6521     # fetches title/description/AC from Azure
+        ▼   fill in Technical Hints
+/squad-plan-generate <intake>           # Claude reads the code, writes the plan
+        ▼   review
+/squad-implement <plan>
+```
+
+**Story id convention:** a bare numeric folder id (e.g. `6521`) is Azure-sourced; a `q-` prefix (e.g. `q-stats-filter`) is a local quick story not yet logged to any tracker.
+
+---
+
 - **Visual console** — `squad console` opens a local, dark-modern web UI for stories, plans, live planner runs, config, secrets, tracker, and doctor. Loopback-only, token-gated. v0.6.0 redesigned the console with a near-monochrome Vercel/Geist palette, a Cmd+K command palette, Linear-style chord shortcuts (`g s`, `g p`, `?`), a portal-rendered dialog system, and a density toggle. Full tour: [`docs/console.md`](docs/console.md).
 
 ![Squad console dashboard](docs/images/console/dashboard.png)
