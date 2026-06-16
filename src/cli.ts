@@ -45,24 +45,18 @@ program
   .option('-y, --yes', 'Accept defaults (non-interactive)', false)
   .option(
     '--skip-secrets-prompt',
-    'Do not prompt for tracker or planner API keys (leaves .squad/secrets.yaml unchanged)',
+    'Do not prompt for tracker API keys (leaves .squad/secrets.yaml unchanged)',
     false,
   )
-  .option(
-    '--planner <provider>',
-    'Enable direct planner and set provider (anthropic|openai|google). Implies non-interactive enable.',
-  )
-  .option('--no-planner', 'Disable direct planner in non-interactive mode (default when -y).', false)
   .action(
     wrap(
-      (opts: InitOptions & { noPlanner?: boolean; planner?: string; agents?: string; skipSecretsPrompt?: boolean }) => {
-        const { noPlanner, skipSecretsPrompt, ...rest } = opts;
+      (opts: InitOptions & { agents?: string; skipSecretsPrompt?: boolean }) => {
+        const { skipSecretsPrompt, ...rest } = opts;
         const noPromptSecrets =
           Boolean(skipSecretsPrompt) || process.argv.includes('--no-prompt-secrets');
         return runInit({
           ...rest,
           noPromptSecrets,
-          planner: noPlanner ? false : rest.planner,
         });
       },
     ),
@@ -85,44 +79,46 @@ program
 
 program
   .command('new-plan [intake-path]')
-  .description('Generate a plan (via direct API when configured, otherwise copy-paste)')
+  .description('Compose the plan prompt and copy to clipboard (use /squad-plan-generate in Claude Code for direct generation)')
   .option('--no-clipboard', 'Do not copy the composed prompt to clipboard (copy-paste mode only)')
   .option('--feature <slug>', 'Filter picker by feature slug')
   .option('--all', 'Include already-planned intakes in the picker', false)
   .option('-y, --yes', 'Skip confirmation prompts', false)
-  .option('--api', 'Force direct planner API (fails if not configured)', false)
-  .option('--copy', 'Force copy-paste mode even when planner API is configured', false)
-  .option('--no-scout', 'Disable the scout stage (draft only)', false)
-  .option('--scout-model <id>', 'Override scout model id (cheap tier default from PLANNER_MODEL_MAP)')
-  .option(
-    '--max-scout-files <n>',
-    'Maximum files the scout can pre-select (default from config or 12)',
-    (v) => parseInt(v, 10),
-  )
-  .option('--no-validation', 'Disable post-write validation', false)
-  .option('--strict-validation', 'Write partial plan when validation finds issues', false)
-  .addOption(
-    new Option('--anthropic-runtime <mode>', 'Anthropic only: agent-sdk or legacy vercel AI SDK').choices([
-      'agent-sdk',
-      'vercel',
-    ]),
-  )
-  .addOption(
-    new Option('--effort <name>', 'Anthropic Agent SDK: draft-stage effort').choices([
-      'minimal',
-      'medium',
-      'high',
-    ]),
-  )
-  .addOption(
-    new Option('--scout-effort <name>', 'Anthropic Agent SDK: scout-stage effort').choices([
-      'minimal',
-      'medium',
-      'high',
-    ]),
-  )
-  .option('--no-thinking', 'Anthropic Agent SDK: disable extended thinking for this run', false)
+  .option('--api', 'Not available in this fork — shows a redirect to /squad-plan-generate', false)
+  .option('--copy', 'Force copy-paste mode', false)
   .action(wrapArgs(runNewPlan));
+
+program
+  .command('quick-story')
+  .description('Create a local intake (no tracker) for fast plan-then-implement')
+  .requiredOption('--feature <slug>', 'Feature slug (e.g. stats-filter)')
+  .option('--title <title>', 'Story title')
+  .option('--json', 'Output created paths as JSON (for agent consumption)')
+  .action(
+    wrap(async (opts: { feature: string; title?: string; json?: boolean }) => {
+      const { runQuickStory } = await import('./commands/quick-story.js');
+      await runQuickStory(opts);
+    }),
+  );
+
+program
+  .command('push-work-item')
+  .description('Create a work item on Azure DevOps (documents completed work)')
+  .requiredOption('--kind <kind>', 'Work item type: Task, Bug, or "User Story"')
+  .requiredOption('--title <title>', 'Work item title')
+  .option('--description <text>', 'Description body')
+  .option('--acceptance <text>', 'Acceptance criteria')
+  .option('--parent <id>', 'Parent work item id (creates a hierarchy link)')
+  .option('--area <path>', 'Area path override')
+  .option('--iteration <path>', 'Iteration path override')
+  .option('--tags <list>', 'Comma-separated tags')
+  .option('--json', 'Print the created work item as JSON (for agent parsing)')
+  .action(
+    wrap(async (opts) => {
+      const { runPushWorkItem } = await import('./commands/push-work-item.js');
+      await runPushWorkItem(opts);
+    }),
+  );
 
 program.command('status').description('Show squad-kit workspace status').action(wrap(runStatus));
 

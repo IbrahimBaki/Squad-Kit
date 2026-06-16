@@ -52,6 +52,8 @@ export interface TrackerClient {
     targetDir: string,
     opts?: DownloadOptions,
   ): Promise<DownloadedAttachment[]>;
+  /** Create a new work item. Optional — only implemented by Azure DevOps. */
+  createWorkItem?(input: CreateWorkItemInput): Promise<CreateWorkItemResult>;
 }
 
 export interface DownloadOptions {
@@ -67,4 +69,24 @@ export class TrackerError extends Error {
     super(message);
     this.name = 'TrackerError';
   }
+}
+
+export type WorkItemKind = 'Task' | 'Bug' | 'User Story';
+
+export interface CreateWorkItemInput {
+  kind: WorkItemKind;
+  title: string;
+  description?: string;
+  acceptanceCriteria?: string;
+  parentId?: string;
+  areaPath?: string;
+  iterationPath?: string;
+  tags?: string[];
+}
+
+export interface CreateWorkItemResult {
+  id: string;
+  title: string;
+  kind: string;
+  url: string;
 }

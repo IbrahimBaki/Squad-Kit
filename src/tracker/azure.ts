@@ -1,5 +1,7 @@
 import type {
   AttachmentRef,
+  CreateWorkItemInput,
+  CreateWorkItemResult,
   DownloadOptions,
   DownloadedAttachment,
   FetchIssueResult,
@@ -150,6 +152,83 @@ export class AzureDevOpsClient implements TrackerClient {
     opts?: DownloadOptions,
   ): Promise<DownloadedAttachment[]> {
     return downloadAttachmentsWith(refs, targetDir, this.headers(), opts);
+  }
+
+  async createWorkItem(input: CreateWorkItemInput): Promise<CreateWorkItemResult> {
+    const url = `${this.baseUrl}/workitems/$${encodeURIComponent(input.kind)}?api-version=${this.apiVersion}`;
+
+    const ops: Array<{ op: string; path: string; value: unknown }> = [
+      { op: 'add', path: '/fields/System.Title', value: input.title },
+    ];
+    if (input.description) {
+      ops.push({ op: 'add', path: '/fields/System.Description', value: input.description });
+    }
+    if (input.acceptanceCriteria) {
+      ops.push({
+        op: 'add',
+        path: '/fields/Microsoft.VSTS.Common.AcceptanceCriteria',
+        value: input.acceptanceCriteria,
+      });
+    }
+    if (input.areaPath) {
+      ops.push({ op: 'add', path: '/fields/System.AreaPath', value: input.areaPath });
+    }
+    if (input.iterationPath) {
+      ops.push({ op: 'add', path: '/fields/System.IterationPath', value: input.iterationPath });
+    }
+    if (input.tags && input.tags.length > 0) {
+      ops.push({ op: 'add', path: '/fields/System.Tags', value: input.tags.join('; ') });
+    }
+    if (input.parentId) {
+      ops.push({
+        op: 'add',
+        path: '/relations/-',
+        value: {
+          rel: 'System.LinkTypes.Hierarchy-Reverse',
+          url: `${this.baseUrl}/workitems/${encodeURIComponent(input.parentId)}`,
+          attributes: { comment: '' },
+        },
+      });
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          ...this.headers(),
+          'content-type': 'application/json-patch+json',
+        },
+        body: JSON.stringify(ops),
+      });
+    } catch (err) {
+      throw new TrackerError(
+        `Azure DevOps create work item failed: ${(err as Error).message}`,
+        'network',
+      );
+    }
+
+    if (res.status === 401 || res.status === 403) {
+      throw new TrackerError(
+        `Azure DevOps authentication failed (HTTP ${res.status}). ` +
+          `Your PAT must have "Work Items (Read & Write)" scope to create work items.`,
+        'auth',
+        res.status,
+      );
+    }
+    if (!res.ok) {
+      throw this.mapHttpError(res.status, 'create');
+    }
+
+    const body = (await res.json()) as AzureWorkItemPayload;
+    const id = String(body.id ?? '');
+    const fields = body.fields ?? {};
+    return {
+      id,
+      title: fields['System.Title'] ?? input.title,
+      kind: fields['System.WorkItemType'] ?? input.kind,
+      url: `${this.webBase}/${id}`,
+    };
   }
 
   private headers(): Record<string, string> {

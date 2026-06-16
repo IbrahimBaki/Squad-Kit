@@ -84,24 +84,69 @@ pnpm add -g squad-kit@0.2.0
 
 Requires Node 18+.
 
+## Workflows
+
+This fork supports two parallel workflows. Choose based on whether you already have a tracker story.
+
+### Local-first (daily — no tracker required)
+
+Go from raw description to reviewable plan in one step:
+
+```
+/squad-quick "in stats, In Probation, In Notice Period and Employment Type are not reflected with filters"
+```
+
+`/squad-quick` analyzes the codebase, creates a local intake under `.squad/stories/<feature>/q-<feature>/`, and generates the plan. Review the plan, then implement:
+
+```
+/squad-implement .squad/plans/<feature>/NN-story-<slug>.md
+```
+
+After implementing, optionally document the work on Azure DevOps:
+
+```
+/squad-log --kind Bug --parent 6432 q-stats-filter
+```
+
+`/squad-log` reads the existing intake + plan (no re-analysis) and creates the work item, then appends a tracker reference into the intake.
+
+### Tracker-first (Azure / Jira stories)
+
+```bash
+squad new-story <feature> --id <tracker-id>          # fetch intake from tracker
+# → edit .squad/stories/<feature>/<id>/intake.md
+/squad-plan-generate .squad/stories/<feature>/<id>/intake.md
+/squad-implement .squad/plans/<feature>/NN-story-<id>.md
+```
+
+### Story id convention
+
+| Folder name | Meaning |
+| --- | --- |
+| `6521/` | Came from Azure DevOps (bare numeric id) |
+| `q-stats-filter/` | Local quick story, no tracker yet |
+
+Azure-sourced and quick stories never collide — the `q-` prefix is the visual separator.
+
 ## Quickstart
 
 ```bash
 cd your-project
-squad init                                              # interactive: tracker, planner, agents, name
-squad new-story auth --title "SSO support"              # or: squad new-story auth --id ENG-42 to auto-fetch
+squad init --agents claude-code                        # bootstrap .squad/ and install slash commands
+squad new-story auth --title "SSO support"             # tracker-first: or --id ENG-42 to auto-fetch
 # → edit .squad/stories/auth/ENG-42/intake.md
 
-/squad-plan .squad/stories/auth/ENG-42/intake.md        # in your agent (Claude / Cursor / Copilot / Gemini)
+/squad-plan-generate .squad/stories/auth/ENG-42/intake.md   # in Claude Code
 # → .squad/plans/auth/01-story-sso-support.md
 
-# new agent chat · attach ONLY the plan file · a cheap model ships it
+# new Claude Code session · attach ONLY the plan file
+/squad-implement .squad/plans/auth/01-story-sso-support.md
 ```
 
-No slash commands in your agent? Skip the meta-prompt copy-paste entirely:
+Or skip the tracker entirely with local-first:
 
-```bash
-squad new-plan --api   # interactive picker, direct provider call, writes the plan file
+```
+/squad-quick "add SSO support to the auth module"
 ```
 
 Configuration, credential edits, and non-interactive flags: see [`docs/customization.md`](docs/customization.md) and `squad config show`. Full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
@@ -112,7 +157,9 @@ Configuration, credential edits, and non-interactive flags: see [`docs/customiza
 | --- | --- |
 | `squad init` | Scaffold `.squad/` with config, bundled prompts reference, and agent slash-commands. See [`docs/getting-started.md`](docs/getting-started.md). |
 | `squad new-story [feature] [--id ID] [--title …] [--no-tracker] [--no-fetch] [--no-attachments] [--attachment-mb n]` | Create a story intake. Auto-fetches from the configured tracker when `--id` is given. |
-| `squad new-plan [intake] [--api] [--copy] [--feature <slug>] [--all]` | Generate a plan from an intake. `--api` calls the configured planner; without `--api`, copy-paste mode prints the prompt to stdout and clipboard (`--no-clipboard` to skip the clipboard). |
+| `squad quick-story --feature <slug> [--title …] [--json]` | Create a local quick-story intake (no tracker). Id prefixed with `q-`. Use `/squad-quick` for the full analyze+plan flow. |
+| `squad new-plan [intake] [--copy] [--feature <slug>] [--all]` | Compose the plan prompt and copy to clipboard. Use `/squad-plan-generate` inside Claude Code for direct generation (no API key needed). |
+| `squad push-work-item --kind <kind> --title <title> [--description …] [--acceptance …] [--parent <id>] [--tags …] [--json]` | Create a work item on Azure DevOps. Requires PAT with "Work Items (Read & Write)" scope. Use `/squad-log` for the full summarize+create flow. |
 | `squad status` | Counts, next `NN`, planner and tracker rows (including credential source). |
 | `squad list [--feature <slug>]` | Table of stories and plan state. |
 | `squad tracker link [story] [id]` | Attach or update a tracker id on an intake. |
@@ -123,34 +170,32 @@ Configuration, credential edits, and non-interactive flags: see [`docs/customiza
 | `squad upgrade [--check] [-y]` | Check npm and install a newer squad-kit release. |
 | `squad console [--port n] [--no-open]` | Start the loopback web console; see [`docs/console.md`](docs/console.md). |
 
+**Slash commands (Claude Code):**
+
+| Command | What it does |
+| --- | --- |
+| `/squad-quick "<raw description>"` | Analyze codebase, create local intake, generate plan — no tracker. |
+| `/squad-plan-generate <intake-path>` | Generate an implementation plan from any intake (tracker or quick). |
+| `/squad-implement <plan-path>` | Execute a plan in a fresh Claude Code session. |
+| `/squad-log --kind <kind> [--parent <id>] <q-id>` | Document a completed quick story on Azure DevOps (no re-analysis). |
+
 Deeper option lists: `squad <command> --help` and the `docs/` pages above.
 
-## Direct planner (optional)
+## Plan generation
 
-Off by default. Enable during `squad init` (answer **yes** to *Enable automatic plan generation?*) or later with `squad config set planner`. Supported providers: Anthropic, OpenAI, Google.
+This fork removes the direct API planner (`squad new-plan --api`). Use `/squad-plan-generate` inside Claude Code instead — it runs the same planning logic using your Claude Code session, with no API key required.
 
-Credential resolution order:
-
-1. Provider env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`).
-2. `.squad/secrets.yaml` under `planner.<provider>.apiKey` (or cross-provider `SQUAD_PLANNER_API_KEY`).
-3. Interactive prompt (TTY only).
-4. Fail with a recovery hint.
-
-Override the default plan-phase model without editing squad-kit:
-
-```yaml
-planner:
-  enabled: true
-  provider: anthropic
-  cache:
-    enabled: true   # default; turn off via squad config set planner
-  modelOverride:
-    anthropic: claude-opus-5-0      # riding a newer provider release early
+```
+/squad-plan-generate .squad/stories/<feature>/<id>/intake.md
 ```
 
-`squad status` marks the planner row `(override)` when a `modelOverride` is active. `squad doctor` probes the provider's `/v1/models` endpoint (no paid completion) and tells you what to do if the id is no longer served.
+Once the plan is written, open a new Claude Code session and implement it:
 
-Slash commands inside your agent (`/squad-plan`) continue to work unchanged — the agent already has your repo in scope. The direct planner is an alternative path, not a replacement. For where keys live, see [Secrets](#secrets) below and [`docs/customization.md`](docs/customization.md).
+```
+/squad-implement .squad/plans/<feature>/NN-story-<id>.md
+```
+
+For copy-paste mode (paste into any chat), use `squad new-plan --copy`. The `/squad-plan` command (original squad-kit slash command) continues to work unchanged for agents with access to the squad-kit prompt templates.
 
 ## Tracker auto-fetch
 
